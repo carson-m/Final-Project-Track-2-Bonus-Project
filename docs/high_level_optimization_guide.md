@@ -17,6 +17,32 @@ python train_highlevel_starter.py \
 This is a minimal black-box search over starter planner parameters. It is useful
 for debugging the loop, but it is not a final learned planner by itself.
 
+## What To Train
+
+Train a policy with parameters `theta`:
+
+```text
+track_observation[5] -> planner_theta -> [vx, vy, yaw_rate]
+```
+
+The training signal is the evaluator output in `results.json`, especially
+`scores.composite_score`, `lap_completion`, `valid_distance_m`, boundary
+violations, falls, and lateral error.
+
+## Minimal Training Loop
+
+1. Put your learned planner in `track_bonus/planner.py`.
+2. Keep `StarterTrackPlanner.load(planner_config)` and
+   `planner.command(track_observation, t)`.
+3. Run short no-render rollouts with `run_track_bonus.py`.
+4. Update planner parameters using your method.
+5. Run the full evaluation and include your training method in the report.
+
+Your method can be PPO/RL, CEM, evolution strategies, black-box optimization of
+an MLP, or supervised pretraining followed by rollout optimization. If your
+planner uses weights, submit the weights file and make `planner_config.json`
+point to it.
+
 ## Possible Directions
 
 - Replace the internals of `track_bonus/planner.py` with an MLP, RL policy, or

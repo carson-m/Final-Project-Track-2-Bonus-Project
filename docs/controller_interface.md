@@ -37,6 +37,8 @@ rescale commands.
 The default evaluator loads `StarterTrackPlanner.load(planner_config)` and then
 calls `planner.command(track_observation, t)`. If you replace the controller
 implementation, keep that entry point.
+Learned weights can be loaded inside `StarterTrackPlanner.load(...)`; keep any
+weight path in `planner_config.json`.
 The evaluator validates the official track fields in the planner config and
 uses its own fixed track for reset, scoring, and rendering.
 

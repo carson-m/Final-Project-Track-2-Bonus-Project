@@ -60,6 +60,7 @@ Main metrics: `lap_completion`, `valid_distance_m`, `finish_time`, `fall`,
 ```text
 best_checkpoint/
 planner_config.json
+planner weights, if used
 changed planner code, if any
 submission.json
 track_eval/results.json
@@ -67,8 +68,8 @@ optional track_eval/race.mp4
 short_report.pdf
 ```
 
-Report briefly: low-level changes, learned high-level planner design, training
-method, final metrics, and one failed idea.
+Report briefly: low-level changes, learned high-level planner design, where its
+weights are stored, training method, final metrics, and one failed idea.
 
 ## Grading
 

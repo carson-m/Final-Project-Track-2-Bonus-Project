@@ -69,6 +69,7 @@ Typical leaderboard submission:
 ```text
 best_checkpoint/
 planner_config.json
+planner weights, if used
 changed planner code, if any
 submission.json
 track_eval/results.json
