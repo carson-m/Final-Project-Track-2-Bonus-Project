@@ -46,6 +46,8 @@ You are given:
 - `run_track_bonus.py`, which evaluates one low-level checkpoint plus one
   high-level planner on the oval.
 - `train_highlevel_starter.py`, a small parameter-search scaffold.
+- `scripts/render_track_tournament.py`, which combines up to 10 independently
+  evaluated rollout files into one synchronized MuJoCo video.
 - A Colab notebook that installs dependencies, clones this repo, trains or
   restores a checkpoint, runs evaluation, and renders a video.
 - A release handout explaining proposal final project, tournament, and combined
@@ -58,6 +60,12 @@ For the high-level optimization details, read:
 
 ```text
 docs/high_level_optimization_guide.md
+```
+
+For the fixed high-level input/output interface, read:
+
+```text
+docs/controller_interface.md
 ```
 
 ## 3. Required Student Work
@@ -130,6 +138,19 @@ The high-level output must be:
 ```
 
 in the same command convention used by the low-level joystick policy.
+
+Official command limits:
+
+```text
+vx_mps:          [0.00, 1.50]
+vy_mps:          [-0.50, 0.50]
+yaw_rate_radps:  [-1.50, 1.50]
+```
+
+The evaluator clips commands to this range and rejects non-finite or
+wrong-shaped commands. The high-level controller may use only the current
+robot's own state and track geometry; it may not read other robots' states or
+future rollout information.
 
 ## 6. Starter Commands
 

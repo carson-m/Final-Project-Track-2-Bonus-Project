@@ -65,6 +65,7 @@ Read the full assignment requirements before changing code:
 ```text
 docs/assignment_requirements.md
 docs/track2_assignment_handout.md
+docs/controller_interface.md
 ```
 
 For how the high-level planner can be optimized, read:
@@ -122,6 +123,66 @@ Outputs:
 - `race_rollouts.npz`
 - `race.mp4` unless `--no-render` is used
 
+## High-Level Controller Contract
+
+To keep all submissions compatible with the official tournament runner, the
+high-level controller interface is fixed:
+
+```text
+input:
+  own robot qpos, base xy/yaw, track progress, lateral error,
+  boundary margin, heading error, curvature, and time
+
+output:
+  [vx_mps, vy_mps, yaw_rate_radps]
+```
+
+Official command limits:
+
+```text
+vx_mps:          [0.00, 1.50]
+vy_mps:          [-0.50, 0.50]
+yaw_rate_radps:  [-1.50, 1.50]
+```
+
+Commands are clipped by `track_bonus/controller_interface.py`. The high-level
+controller must not depend on other robots, future states, hidden simulator
+internals, or manually edited evaluator outputs. The low-level checkpoint must
+remain a Brax PPO checkpoint with actor `policy_obs_key = "state"`.
+
+For the full contract, read:
+
+```text
+docs/controller_interface.md
+```
+
+## 10-Dog Tournament Visualization
+
+The release infrastructure supports synchronized visualization for up to 10
+Go2 entries. Scoring remains independent per policy; the renderer combines the
+saved `race_rollouts.npz` files into one MuJoCo scene so different teams'
+Python controllers never need to be imported into the same process.
+
+Synthetic infrastructure demo:
+
+```bash
+python scripts/render_track_tournament.py \
+  --demo-synthetic \
+  --num-dogs 10 \
+  --output-dir artifacts/ten_dog_demo
+```
+
+Real tournament rendering after each team has produced `track_eval/race_rollouts.npz`:
+
+```bash
+python scripts/render_track_tournament.py \
+  --entries tournament_entries.json \
+  --visual-lane-offsets \
+  --output-dir artifacts/tournament_render
+```
+
+For 10 dogs, the compiled MuJoCo model reports `nq = 190` and `nu = 120`.
+
 ## Optional High-Level Search
 
 The included high-level trainer is a small black-box parameter search:
@@ -167,6 +228,7 @@ run_track_bonus.py
 train_highlevel_starter.py
 docs/assignment_requirements.md
 docs/track2_assignment_handout.md
+docs/controller_interface.md
 docs/high_level_optimization_guide.md
 ```
 

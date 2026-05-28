@@ -130,6 +130,21 @@ Acceptable high-level approaches include:
 - MPC-style or optimization-based controller, as long as it produces the
   required `[vx, vy, yaw_rate]` command at runtime.
 
+All approaches must obey the same controller interface:
+
+- input is the robot's own pose/state plus track geometry features
+- output is exactly `[vx_mps, vy_mps, yaw_rate_radps]`
+- official command limits are `[0.00, 1.50]`, `[-0.50, 0.50]`, and
+  `[-1.50, 1.50]`
+- the controller cannot depend on other robots, future states, or hidden
+  simulator internals
+
+Read:
+
+```text
+docs/controller_interface.md
+```
+
 ## 7. Required Tournament Artifacts
 
 Submit a folder or zip with:
@@ -180,6 +195,19 @@ It walks through:
 The notebook intentionally skips full evaluation if no checkpoint exists. This
 allows everyone to run the setup cells first, then plug in a HW1 checkpoint or
 train a new low-level policy.
+
+The repository also includes a 10-dog visualization utility:
+
+```bash
+python scripts/render_track_tournament.py \
+  --demo-synthetic \
+  --num-dogs 10 \
+  --output-dir artifacts/ten_dog_demo
+```
+
+Real tournament videos should combine the independently evaluated
+`race_rollouts.npz` files from each team. This avoids conflicts between
+different teams' Python high-level controllers.
 
 ## 9. Academic Integrity And Benchmark Boundaries
 

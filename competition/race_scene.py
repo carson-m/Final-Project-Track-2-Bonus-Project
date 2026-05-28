@@ -275,19 +275,34 @@ def render_race_video(
         media.write_video(output_path, frames, fps=int(fps))
         written_path = output_path
     except Exception:
-        # Some lab machines have MuJoCo rendering but no ffmpeg. Keep the
-        # visualization path useful by falling back to a GIF that PIL can write.
-        from PIL import Image
+        try:
+            import imageio.v2 as imageio
+            import imageio_ffmpeg  # noqa: F401
 
-        written_path = output_path if output_path.suffix.lower() == ".gif" else output_path.with_suffix(".gif")
-        pil_frames = [Image.fromarray(frame) for frame in frames]
-        duration_ms = max(1, int(round(1000.0 / float(fps))))
-        pil_frames[0].save(
-            written_path,
-            save_all=True,
-            append_images=pil_frames[1:],
-            duration=duration_ms,
-            loop=0,
-        )
+            written_path = output_path if output_path.suffix.lower() == ".mp4" else output_path.with_suffix(".mp4")
+            with imageio.get_writer(
+                written_path,
+                fps=int(fps),
+                codec="libx264",
+                pixelformat="yuv420p",
+                macro_block_size=1,
+            ) as writer:
+                for frame in frames:
+                    writer.append_data(frame)
+        except Exception:
+            # Some lab machines have MuJoCo rendering but no ffmpeg. Keep the
+            # visualization path useful by falling back to a GIF that PIL can write.
+            from PIL import Image
+
+            written_path = output_path if output_path.suffix.lower() == ".gif" else output_path.with_suffix(".gif")
+            pil_frames = [Image.fromarray(frame) for frame in frames]
+            duration_ms = max(1, int(round(1000.0 / float(fps))))
+            pil_frames[0].save(
+                written_path,
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=duration_ms,
+                loop=0,
+            )
     renderer.close()
     return written_path

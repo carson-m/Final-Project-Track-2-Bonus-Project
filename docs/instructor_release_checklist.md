@@ -9,6 +9,7 @@ Confirm these files exist and are readable:
 - `README.md`
 - `docs/track2_assignment_handout.md`
 - `docs/assignment_requirements.md`
+- `docs/controller_interface.md`
 - `docs/high_level_optimization_guide.md`
 - `notebooks/track_bonus_colab_template.ipynb`
 
@@ -19,6 +20,8 @@ The handout should explain:
 - combined route for bonus points
 - tournament ranking by full-lap `finish_time` or incomplete-run
   `valid_distance_m`
+- fixed high-level controller input/output contract
+- 10-dog rollout-based tournament rendering path
 - deliverables and reproducibility expectations
 
 ## 2. Starter Repository Boundaries
@@ -58,6 +61,8 @@ python -m pytest -q tests
 python -m py_compile \
   run_track_bonus.py \
   train_highlevel_starter.py \
+  scripts/render_track_tournament.py \
+  track_bonus/controller_interface.py \
   track_bonus/planner.py \
   track_bonus/scoring.py \
   go2_pg_env/track.py
@@ -74,9 +79,22 @@ path = Path("notebooks/track_bonus_colab_template.ipynb")
 nb = nbformat.read(path, as_version=4)
 print("cells", len(nb.cells))
 assert any("track2_assignment_handout" in cell.source for cell in nb.cells)
+assert any("controller_interface" in cell.source for cell in nb.cells)
 assert any("CHECKPOINT_DIR does not exist" in cell.source for cell in nb.cells)
 PY
 ```
+
+10-dog model compile check after Go2 assets are available:
+
+```bash
+python scripts/render_track_tournament.py \
+  --demo-synthetic \
+  --num-dogs 10 \
+  --output-dir artifacts/ten_dog_compile_check \
+  --no-render
+```
+
+The summary should report `model_nq = 190` and `model_nu = 120`.
 
 ## 4. Expected Student Commands
 

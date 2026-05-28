@@ -33,6 +33,7 @@ from course_common import (
 )
 from go2_pg_env.track import StandardOvalTrack
 from test_policy import load_policy_with_workaround
+from track_bonus.controller_interface import sanitize_high_level_command
 from track_bonus.planner import StarterTrackPlanner
 from track_bonus.scoring import compute_track_bonus_metrics, score_track_bonus
 
@@ -166,7 +167,7 @@ def rollout(
             snap = frozen_snapshot
         else:
             qpos_now = np.asarray(state.data.qpos, dtype=np.float32)
-            command = planner.command(qpos_now, t=step_idx * env.dt)
+            command = sanitize_high_level_command(planner.command(qpos_now, t=step_idx * env.dt))
             state = _force_command(state, command, jax)
             rng, act_key = jax.random.split(rng)
             action, _ = policy(state.obs, act_key)
