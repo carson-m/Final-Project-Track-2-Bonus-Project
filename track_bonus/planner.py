@@ -1,20 +1,10 @@
-"""Starter high-level planner for the 200 m track bonus.
-
-The evaluator builds the official compact 5D track observation defined in
-`track_bonus/controller_interface.py`. The high-level planner maps it to the
-local joystick command consumed by the HW1 Go2 locomotion policy:
-
-    5D track observation -> [vx, vy, yaw_rate]
-
-This file is intentionally small.  It is a weak baseline and an interface
-example, not a solved full-lap controller.
-"""
+"""Learned Neural Network (MLP) High-Level Planner for the 200m Track."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,87 +16,72 @@ from track_bonus.official_track import official_track
 
 
 @dataclass(frozen=True)
-class StarterPlannerConfig:
-    planner_type: str = "starter_pd"
-    speed_mps: float = 0.45
-    min_speed_mps: float = 0.12
-    max_lateral_speed_mps: float = 0.08
-    max_yaw_rate_radps: float = 0.25
-    k_heading: float = 0.55
-    k_lateral: float = 0.08
-    heading_slowdown: float = 0.45
+class LearnedPlannerConfig:
+    planner_type: str = "learned_mlp"
+    weights_path: str = "planner_weights.npz"
     stand_seconds: float = 1.0
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "StarterPlannerConfig":
+    def from_dict(cls, payload: dict[str, Any]) -> "LearnedPlannerConfig":
         valid = set(cls.__dataclass_fields__.keys())
-        values = {key: payload[key] for key in valid if key in payload}
+        values = {key: payload[key] for key in payload if key in valid}
         return cls(**values)
-
-    @classmethod
-    def load(cls, path: Path) -> "StarterPlannerConfig":
-        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "planner_type": self.planner_type,
-            "speed_mps": self.speed_mps,
-            "min_speed_mps": self.min_speed_mps,
-            "max_lateral_speed_mps": self.max_lateral_speed_mps,
-            "max_yaw_rate_radps": self.max_yaw_rate_radps,
-            "k_heading": self.k_heading,
-            "k_lateral": self.k_lateral,
-            "heading_slowdown": self.heading_slowdown,
-            "stand_seconds": self.stand_seconds,
-        }
 
 
 class StarterTrackPlanner:
-    """Conservative coordinate-to-command baseline.
+    """Entrypoint class keeping original names so evaluator scripts match."""
 
-    The policy is deliberately simple and conservative. Students should improve
-    it by changing this controller, replacing it with an MLP, or training a
-    higher-level policy that produces the same command vector.
-    """
-
-    def __init__(self, config: StarterPlannerConfig) -> None:
-        if config.planner_type != "starter_pd":
-            raise ValueError(f"Unsupported planner_type: {config.planner_type!r}")
+    def __init__(self, config: LearnedPlannerConfig, weights: dict[str, np.ndarray] | None = None):
         self.config = config
-        self.track: StandardOvalTrack = official_track()
+        self.track = official_track()
+        self.weights = weights
 
     @classmethod
-    def load(cls, path: Path) -> "StarterTrackPlanner":
-        return cls(StarterPlannerConfig.load(path))
+    def load(cls, path: Path | str) -> "StarterTrackPlanner":
+        path = Path(path)
+        with open(path, "r") as f:
+            payload = json.load(f)
+        config = LearnedPlannerConfig.from_dict(payload)
+        
+        # Look for the weights file relative to the config json path
+        weights_file = path.parent / config.weights_path
+        weights = None
+        if weights_file.exists():
+            weights = np.load(weights_file)
+            
+        return cls(config, weights)
 
     def command(self, obs: TrackControllerObservation, t: float) -> np.ndarray:
+        # Give the robot time to stand up safely
         if t < self.config.stand_seconds:
             return np.zeros(3, dtype=np.float32)
-        return self.command_from_observation(obs)
 
-    def command_from_observation(self, obs: TrackControllerObservation) -> np.ndarray:
-        lateral_error = float(obs.lateral_error_norm) * float(self.track.half_width_m)
-        lateral_bias = math.atan2(
-            float(self.config.k_lateral) * lateral_error,
-            max(float(self.config.speed_mps), 1e-3),
-        )
-        heading_error = wrap_angle(float(obs.heading_error_rad) - lateral_bias)
+        # Build standard 5D track observation array
+        x = np.array([
+            float(obs.lap_fraction),
+            float(obs.lateral_error_norm),
+            float(obs.boundary_margin_norm),
+            float(obs.heading_error_rad),
+            float(obs.curvature_norm)
+        ], dtype=np.float32)
 
-        speed_scale = 1.0 - float(self.config.heading_slowdown) * min(abs(heading_error), math.pi) / math.pi
-        vx = np.clip(
-            float(self.config.speed_mps) * speed_scale,
-            float(self.config.min_speed_mps),
-            float(self.config.speed_mps),
-        )
-        vy = np.clip(
-            -float(self.config.k_lateral) * lateral_error,
-            -float(self.config.max_lateral_speed_mps),
-            float(self.config.max_lateral_speed_mps),
-        )
-        curvature = float(obs.curvature_norm) / max(float(self.track.turn_radius_m), 1e-6)
-        yaw_rate = np.clip(
-            curvature * vx + float(self.config.k_heading) * heading_error,
-            -float(self.config.max_yaw_rate_radps),
-            float(self.config.max_yaw_rate_radps),
-        )
-        return np.asarray([vx, vy, yaw_rate], dtype=np.float32)
+        # Fallback safe crawl if weights aren't loaded or found yet
+        if self.weights is None:
+            return np.array([0.3, 0.0, 0.0], dtype=np.float32)
+
+        # Forward Pass: 5 Inputs -> Hidden Layers -> 3 Outputs
+        w1, b1 = self.weights['w1'], self.weights['b1']
+        w2, b2 = self.weights['w2'], self.weights['b2']
+
+        # Layer 1 Activation (ReLU)
+        h1 = np.maximum(0, np.dot(x, w1) + b1)
+        
+        # Layer 2 Output (Linear)
+        out = np.dot(h1, w2) + b2
+
+        # Bound predictions to keep your low-level controller inside its safe operating envelope
+        vx = np.clip(out[0], 0.0, 1.5)        # Forward speed limit
+        vy = np.clip(out[1], -0.3, 0.3)       # Lateral drift adjustment limit 
+        yaw_rate = np.clip(out[2], -1.2, 1.2) # Max turning angular velocity
+
+        return np.array([vx, vy, yaw_rate], dtype=np.float32)
