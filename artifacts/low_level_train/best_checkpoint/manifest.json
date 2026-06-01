@@ -1,0 +1,8 @@
+{
+  "selection_method": "best_eval_reward",
+  "selected_step": 26214400,
+  "selected_eval_reward": 29.230510711669922,
+  "source_checkpoint_dir": "/content/EEC289A_Robotics-Homework/artifacts/run_baseline/stage_2/checkpoints/000026214400",
+  "exported_checkpoint_dir": "/content/EEC289A_Robotics-Homework/artifacts/run_baseline/best_checkpoint",
+  "exported_at_unix": 1777860799.6132095
+}
