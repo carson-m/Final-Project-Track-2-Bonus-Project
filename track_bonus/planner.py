@@ -14,6 +14,41 @@ from go2_pg_env.track import StandardOvalTrack, wrap_angle
 from track_bonus.controller_interface import TrackControllerObservation
 from track_bonus.official_track import official_track
 
+class LearnedMLPPlanner:
+    """Loads the trained weights from train_mlp_cem.py and races the robot!"""
+    
+    def __init__(self, config: dict[str, Any]):
+        weights_path = Path(config["weights_path"])
+        if not weights_path.is_absolute():
+            # Assume relative to the config file or current directory
+            weights_path = Path.cwd() / "artifacts" / "highlevel_mlp_cem_vmap" / config["weights_path"]
+            
+        data = np.load(weights_path)
+        self.w1 = data['w1']
+        self.b1 = data['b1']
+        self.w2 = data['w2']
+        self.b2 = data['b2']
+
+    def __call__(self, obs: TrackControllerObservation) -> np.ndarray:
+        # 1. Convert the official observation into a flat array
+        x = np.array([
+            obs.lap_fraction,
+            obs.lateral_error_norm,
+            obs.boundary_margin_norm,
+            obs.heading_error_rad,
+            obs.curvature_norm
+        ], dtype=np.float32)
+
+        # 2. Run the Neural Network Forward Pass (Standard Numpy)
+        h1 = np.maximum(0.0, np.dot(x, self.w1) + self.b1) # ReLU
+        out = np.dot(h1, self.w2) + self.b2                # Linear
+        
+        # 3. Clip the outputs to safe command limits
+        vx = np.clip(out[0], 0.0, 3.0)
+        vy = np.clip(out[1], -0.5, 0.5)
+        yaw_rate = np.clip(out[2], -1.0, 1.0)
+        
+        return np.array([vx, vy, yaw_rate])
 
 @dataclass(frozen=True)
 class LearnedPlannerConfig:
