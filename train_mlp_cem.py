@@ -18,7 +18,9 @@ from course_common import (
     lazy_import_stack, 
     set_runtime_env,
     ensure_environment_available,
-    build_env_overrides
+    build_env_overrides,
+    get_ppo_config,
+    apply_stage_config,
 )
 from test_policy import load_policy_with_workaround
 
@@ -30,15 +32,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "course_config.json")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "artifacts" / "highlevel_mlp_cem_vmap")
     parser.add_argument("--iterations", type=int, default=50, help="Number of evolutionary generations.")
-    parser.add_argument("--population", type=int, default=32, help="Candidates evaluated per generation.")
-    parser.add_argument("--elite-frac", type=float, default=0.25, help="Fraction of population kept as elites.")
+    # --- STRATEGY 2: SCALE UP POPULATION SIZES TO EXPLOIT VMAP PARALLELISM ---
+    parser.add_argument("--population", type=int, default=128, help="Candidates evaluated per generation.")
+    parser.add_argument("--elite-frac", type=float, default=0.20, help="Fraction of population kept as elites.")
     parser.add_argument("--eval-seconds", type=float, default=45.0, help="Simulation time window per evaluation.")
     parser.add_argument("--hidden-dim", type=int, default=32, help="Hidden dimension layout size for the MLP.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--force-cpu", action="store_true")
     return parser.parse_args()
 
-def vector_to_weights(vec: np.ndarray, input_dim: int = 5, hidden_dim: int = 32, output_dim: int = 3) -> dict[str, np.ndarray]:
+def vector_to_weights(vec: np.ndarray, input_dim: int = 8, hidden_dim: int = 32, output_dim: int = 3) -> dict[str, np.ndarray]:
     w1_size = input_dim * hidden_dim
     b1_size = hidden_dim
     w2_size = hidden_dim * output_dim
@@ -56,7 +59,7 @@ def vector_to_weights(vec: np.ndarray, input_dim: int = 5, hidden_dim: int = 32,
     return {"w1": w1, "b1": b1, "w2": w2, "b2": b2}
 
 # ==========================================
-# 1. PURE JAX HIGH-LEVEL PLANNER
+# 1. PURE JAX HIGH-LEVEL PLANNER (Smooth Tanh Activation)
 # ==========================================
 def jax_mlp_forward(weights: dict, obs: jnp.ndarray) -> jnp.ndarray:
     """Takes a dictionary of JAX arrays and outputs [vx, vy, yaw_rate]"""
@@ -68,10 +71,10 @@ def jax_mlp_forward(weights: dict, obs: jnp.ndarray) -> jnp.ndarray:
     # Layer 2: Linear Output
     out = jnp.dot(h1, w2) + b2
     
-    # Clip commands for safety
-    vx = jnp.clip(out[0], 0.0, 3.0)
-    vy = jnp.clip(out[1], -0.5, 0.5)
-    yaw = jnp.clip(out[2], -1.0, 1.0)
+    # Smooth continuous mapping instead of sharp hard clipping boundaries
+    vx = 1.5 * (jnp.tanh(out[0]) + 1.0) # Maps smoothly to [0.0, 3.0]
+    vy = 0.5 * jnp.tanh(out[1])          # Maps smoothly to [-0.5, 0.5]
+    yaw = 1.0 * jnp.tanh(out[2])         # Maps smoothly to [-1.0, 1.0]
     
     return jnp.array([vx, vy, yaw])
 
@@ -165,6 +168,13 @@ def jax_get_track_observation(qpos: jnp.ndarray) -> jnp.ndarray:
         heading_error_rad, curvature_norm
     ], dtype=jnp.float32)
 
+
+def jax_get_curv_norm(s_val: jnp.ndarray) -> jnp.ndarray:
+    s_mod = s_val % 200.0
+    is_turn = ((s_mod >= 50.0) & (s_mod < 100.0)) | ((s_mod >= 150.0) & (s_mod < 200.0))
+    return jnp.where(is_turn, 1.0, 0.0)
+
+
 # ==========================================
 # MAIN SCRIPT
 # ==========================================
@@ -173,7 +183,8 @@ def main() -> None:
     rng_np = np.random.default_rng(args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    input_dim = 5
+    # --- STRATEGY 1 & 3: EXPAND PARAMETERS TO ACCOMMODATE 8D OBSERVATION VECTOR ---
+    input_dim = 8
     hidden_dim = args.hidden_dim
     output_dim = 3
     num_params = (input_dim * hidden_dim) + hidden_dim + (hidden_dim * output_dim) + output_dim
@@ -185,69 +196,130 @@ def main() -> None:
     course_cfg = load_json(args.config)
     course_cfg["runtime_overrides"] = {}
     
-    num_steps = int(round(float(args.eval_seconds) / float(course_cfg["control"]["ctrl_dt"])))
+    ctrl_dt = float(course_cfg["control"]["ctrl_dt"])
+    num_steps = int(round(float(args.eval_seconds) / ctrl_dt))
     
-    # FIXED ENVIRONMENT LOADING
-    ensure_environment_available(stack)
-    overrides = build_env_overrides(course_cfg, "stage_2")
-    env = stack["envs"].get_environment(
-        course_cfg["environment"]["name"], 
-        overrides=overrides, 
-        episode_steps=num_steps
-    )
+    registry = stack["registry"]
+    locomotion_params = stack["locomotion_params"]
+    env_name = course_cfg["environment_name"]
+    ensure_environment_available(registry, env_name)
+
+    env_cfg = registry.get_default_config(env_name)
+    ppo_cfg = get_ppo_config(locomotion_params, env_name, course_cfg["backend_impl"])
+    apply_stage_config(env_cfg, ppo_cfg, course_cfg, "stage_2")
+    env_cfg.episode_length = int(num_steps)
+    env_cfg.noise_config.level = 0.0
+    env_cfg.pert_config.enable = False
+    
+    env = registry.load(env_name, config=env_cfg, config_overrides=build_env_overrides(course_cfg))
     
     ll_policy = load_policy_with_workaround(args.checkpoint_dir.resolve(), deterministic=True)
     if not force_cpu:
         ll_policy = stack["jax"].jit(ll_policy)
 
     # ==========================================
-    # 3. BUILD VMAP ROLLOUT ENGINE
+    # 3. BUILD VMAP ROLLOUT ENGINE (WITH EXPANDED INPUTS & SMOOTHING)
     # ==========================================
-    def step_single_robot(env_state, hl_weights, rng_key):
-        track_obs = jax_get_track_observation(env_state.data.qpos)
-        cmd = jax_mlp_forward(hl_weights, track_obs)
+    def step_single_robot(env_state, hl_weights, rng_key, is_standing, prev_real_s, last_cmd):
+        # Extract base 5D features
+        track_obs_5d = jax_get_track_observation(env_state.data.qpos)
+        s_current = track_obs_5d[0] * 200.0
         
-        # Merge command into observation for HW1 policy
+        # --- STRATEGY 3: VECTORIZED VELOCITY ESTIMATION ---
+        delta_s = s_current - prev_real_s
+        delta_s = jnp.where(delta_s < -100.0, delta_s + 200.0, delta_s)
+        delta_s = jnp.where(delta_s > 100.0, delta_s - 200.0, delta_s)
+        v_est = delta_s / ctrl_dt
+        
+        # --- STRATEGY 1: LOOK-AHEAD EXTENSIONS ---
+        c2 = jax_get_curv_norm(s_current + 2.0)
+        c5 = jax_get_curv_norm(s_current + 5.0)
+        
+        # Construct full 8D Input Space
+        track_obs_8d = jnp.array([
+            track_obs_5d[0], track_obs_5d[1], track_obs_5d[2],
+            track_obs_5d[3], track_obs_5d[4], v_est, c2, c5
+        ])
+        
+        cmd_raw = jax_mlp_forward(hl_weights, track_obs_8d)
+        
+        # --- STRATEGY 5: MATCHING EXPO GAIN RATE FILTER ---
+        alpha = 0.20
+        cmd = alpha * cmd_raw + (1.0 - alpha) * last_cmd
+        
+        # Override during stand-up phase
+        cmd = jnp.where(is_standing, jnp.zeros_like(cmd), cmd)
+        
+        # Merge command into observation for low-level policy
         env_state.info["command"] = cmd
         env_state.info["steps_until_next_cmd"] = jnp.array(10**9, dtype=jnp.int32)
         
+        # Step the low-level environment physics
         action, _ = ll_policy(env_state.obs, rng_key)
         next_state = env.step(env_state, action)
         next_state.info["command"] = cmd
         
-        return next_state, track_obs
+        next_track_obs_5d = jax_get_track_observation(next_state.data.qpos)
+        
+        return next_state, next_track_obs_5d, s_current, cmd
     
-    # Vectorize the step function across candidates
-    batch_robot_step = jax.vmap(step_single_robot, in_axes=(0, 0, 0))
+    # Pass structural arrays properly across batch processing paths
+    batch_robot_step = jax.vmap(step_single_robot, in_axes=(0, 0, 0, None, 0, 0))
 
     @jax.jit
     def batch_rollout(initial_states_batch, batch_weights, batch_keys):
-        def scan_step(current_states, _):
-            next_states, track_obs_batch = batch_robot_step(current_states, batch_weights, batch_keys)
-            # Use Lap Fraction (index 0 of track obs) as our scoring metric
-            step_lap_fractions = track_obs_batch[:, 0] 
-            return next_states, step_lap_fractions
+        track_length = 200.0
 
-        final_states, all_lap_fractions = jax.lax.scan(
-            scan_step, initial_states_batch, None, length=num_steps
+        def scan_step(carry, step_idx):
+            current_states, prev_s, cum_dist, prev_real_s_batch, last_cmd_batch = carry
+            
+            is_standing = (step_idx * ctrl_dt) < 1.0
+            
+            next_states, next_track_obs_batch, current_real_s, next_cmd_batch = batch_robot_step(
+                current_states, batch_weights, batch_keys, is_standing, prev_real_s_batch, last_cmd_batch
+            )
+            
+            s_next = next_track_obs_batch[:, 0] * track_length
+            delta_s = s_next - prev_s
+            delta_s = jnp.where(delta_s < -track_length / 2.0, delta_s + track_length, delta_s)
+            delta_s = jnp.where(delta_s > track_length / 2.0, delta_s - track_length, delta_s)
+            delta_s = jnp.where(is_standing, 0.0, delta_s)
+            
+            next_cum_dist = cum_dist + delta_s
+            step_lateral_errors = jnp.abs(next_track_obs_batch[:, 1])
+            
+            z_height = next_states.data.qpos[:, 2]
+            has_fallen = z_height < 0.23  
+            
+            return (next_states, s_next, next_cum_dist, current_real_s, next_cmd_batch), (next_cum_dist, step_lateral_errors, has_fallen)
+
+        # Initialize trackers
+        init_obs = jax.vmap(jax_get_track_observation)(initial_states_batch.data.qpos)
+        init_s = init_obs[:, 0] * track_length
+        init_cum_dist = jnp.zeros(args.population)
+        init_cmd = jnp.zeros((args.population, 3))
+        
+        init_carry = (initial_states_batch, init_s, init_cum_dist, init_s, init_cmd)
+        
+        _, (all_cum_dists, all_lateral_errors, all_has_fallen) = jax.lax.scan(
+            scan_step, init_carry, jnp.arange(num_steps)
         )
-        return final_states, all_lap_fractions
+        return all_cum_dists, all_lateral_errors, all_has_fallen
     
-    # JAX PRNG Key for resets and actions
     main_rng = jax.random.PRNGKey(args.seed)
 
     print("Environment loaded and compiled! Starting VMAP CEM Optimization...\n")
 
     mu = np.zeros(num_params, dtype=np.float32)
-    sigma = np.ones(num_params, dtype=np.float32) * 0.15
-    best_score = -1.0
+    mu[-3] = 1.0  # Encourage initial forward movement velocity maps
+    sigma = np.ones(num_params, dtype=np.float32) * 0.5
+    best_score = -100.0
     history = []
     num_elites = max(1, int(args.population * args.elite_frac))
 
     for iteration in range(args.iterations):
         t0 = time.time()
         
-        # 1. Sample Population Candidates
         candidates = []
         for i in range(args.population):
             if i == 0 and iteration > 0:
@@ -255,7 +327,6 @@ def main() -> None:
             else:
                 candidates.append(mu + rng_np.normal(0.0, sigma))
         
-        # 2. Stack Weights into JAX Batch Matrices
         batch_weights = {
             'w1': jnp.stack([vector_to_weights(c, hidden_dim=hidden_dim)['w1'] for c in candidates]),
             'b1': jnp.stack([vector_to_weights(c, hidden_dim=hidden_dim)['b1'] for c in candidates]),
@@ -263,19 +334,29 @@ def main() -> None:
             'b2': jnp.stack([vector_to_weights(c, hidden_dim=hidden_dim)['b2'] for c in candidates]),
         }
 
-        # 3. Create 32 Random Keys and Initial States
         main_rng, reset_rng = jax.random.split(main_rng)
         batch_keys = jax.random.split(reset_rng, args.population)
-        
-        # VMAP reset across all keys to get 32 independent starting states
         initial_states_batch = jax.vmap(env.reset)(batch_keys)
 
-        # 4. RUN ALL 32 ROBOTS AT ONCE (This is blazing fast)
-        final_states, all_lap_fractions = batch_rollout(initial_states_batch, batch_weights, batch_keys)
+        all_cum_dists, all_lateral_errors, all_has_fallen = batch_rollout(initial_states_batch, batch_weights, batch_keys)
         
-        # 5. Calculate Scores (Max lap fraction achieved by each bot)
-        scores = jnp.max(all_lap_fractions, axis=0)
-        scores = np.array(scores) # Convert back to standard numpy for sorting
+        # --- STRATEGY 4: CONTINUOUS, SMOOTH OPTIMIZATION LANDSCAPE SCORING ---
+        track_length = 200.0
+        max_unwrapped_lap = jnp.max(all_cum_dists, axis=0) / track_length
+        mean_lateral_error = jnp.mean(all_lateral_errors, axis=0)
+        
+        progress_score = max_unwrapped_lap * 20.0
+        lateral_penalty = 1.5 * mean_lateral_error
+        survival_rate = jnp.mean(1.0 - all_has_fallen.astype(jnp.float32), axis=0)
+        survival_bonus = jnp.where(max_unwrapped_lap > 0.01, 1.0 * survival_rate, 0.0)
+        
+        # Smooth boundaries instead of hard threshold cuts
+        max_lateral = jnp.max(jnp.abs(all_lateral_errors), axis=0)
+        boundary_penalty = jnp.where(max_lateral > 1.0, 8.0 * (max_lateral - 1.0) + 2.0, 0.0)
+        fall_penalty = jnp.where(survival_rate < 1.0, 15.0 * (1.0 - survival_rate), 0.0)
+        
+        scores = progress_score - lateral_penalty + survival_bonus - boundary_penalty - fall_penalty
+        scores = np.array(scores)
 
         # Save Best Candidate and Metadata
         best_idx = int(np.argmax(scores))
@@ -286,14 +367,19 @@ def main() -> None:
             best_weights = vector_to_weights(candidates[best_idx], hidden_dim=hidden_dim)
             np.savez(args.output_dir / "planner_weights.npz", **best_weights)
             
-            config_payload = {"planner_type": "learned_mlp", "weights_path": "planner_weights.npz", "stand_seconds": 1.0}
+            config_payload = {
+                "planner_type": "learned_mlp", 
+                "weights_path": "planner_weights.npz", 
+                "stand_seconds": 1.0,
+                "hidden_dim": hidden_dim
+            }
             (args.output_dir / "planner_config.json").write_text(json.dumps(config_payload, indent=2))
             
             (args.output_dir / "best_score.json").write_text(json.dumps({
                 "score": float(best_score), "iteration": iteration, "candidate": best_idx
             }, indent=2))
 
-        # 6. Fit next generation distributions
+        # Fit next generation distributions
         sorted_indices = np.argsort(scores)[::-1]
         elites = [candidates[idx] for idx in sorted_indices[:num_elites]]
         elites_arr = np.array(elites)
