@@ -26,17 +26,17 @@ from test_policy import load_policy_with_workaround
 
 ROOT = Path(__file__).resolve().parent
 
-COMMAND_FILTER_ALPHA = 0.15
+COMMAND_FILTER_ALPHA = 0.20
 TRACK_LENGTH_M = 200.0
 TURN_RADIUS_M = 18.25
 HALF_WIDTH_M = 2.0
 STRAIGHT_LENGTH_M = (TRACK_LENGTH_M - 2.0 * np.pi * TURN_RADIUS_M) / 2.0
-MAX_STRAIGHT_SPEED_MPS = 0.95
-MAX_CURVE_SPEED_MPS = 0.55
+MAX_STRAIGHT_SPEED_MPS = 1.50
+MAX_CURVE_SPEED_MPS = 0.70
 MAX_LATERAL_SPEED_MPS = 0.25
 MAX_YAW_RATE_RADPS = 0.55
 EDGE_SLOWDOWN_MARGIN_NORM = 0.35
-MAX_COMMAND_DELTA = 0.08
+MAX_COMMAND_DELTA = 0.10
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
