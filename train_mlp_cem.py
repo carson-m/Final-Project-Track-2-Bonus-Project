@@ -26,6 +26,18 @@ from test_policy import load_policy_with_workaround
 
 ROOT = Path(__file__).resolve().parent
 
+COMMAND_FILTER_ALPHA = 0.15
+TRACK_LENGTH_M = 200.0
+TURN_RADIUS_M = 18.25
+HALF_WIDTH_M = 2.0
+STRAIGHT_LENGTH_M = (TRACK_LENGTH_M - 2.0 * np.pi * TURN_RADIUS_M) / 2.0
+MAX_STRAIGHT_SPEED_MPS = 0.95
+MAX_CURVE_SPEED_MPS = 0.55
+MAX_LATERAL_SPEED_MPS = 0.25
+MAX_YAW_RATE_RADPS = 0.55
+EDGE_SLOWDOWN_MARGIN_NORM = 0.35
+MAX_COMMAND_DELTA = 0.08
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-dir", type=Path, required=True, help="Path to low-level locomotion checkpoint.")
@@ -36,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--population", type=int, default=128, help="Candidates evaluated per generation.")
     parser.add_argument("--elite-frac", type=float, default=0.20, help="Fraction of population kept as elites.")
     parser.add_argument("--eval-seconds", type=float, default=45.0, help="Simulation time window per evaluation.")
+    parser.add_argument("--start-s-m", type=float, default=0.0, help="Official track progress used for training resets.")
     parser.add_argument("--hidden-dim", type=int, default=32, help="Hidden dimension layout size for the MLP.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--force-cpu", action="store_true")
@@ -71,10 +84,10 @@ def jax_mlp_forward(weights: dict, obs: jnp.ndarray) -> jnp.ndarray:
     # Layer 2: Linear Output
     out = jnp.dot(h1, w2) + b2
     
-    # Smooth continuous mapping instead of sharp hard clipping boundaries
-    vx = 1.5 * (jnp.tanh(out[0]) + 1.0) # Maps smoothly to [0.0, 3.0]
-    vy = 0.5 * jnp.tanh(out[1])          # Maps smoothly to [-0.5, 0.5]
-    yaw = 1.0 * jnp.tanh(out[2])         # Maps smoothly to [-1.0, 1.0]
+    # Keep commands inside the low-level policy's training distribution.
+    vx = 0.5 * MAX_STRAIGHT_SPEED_MPS * (jnp.tanh(out[0]) + 1.0)
+    vy = MAX_LATERAL_SPEED_MPS * jnp.tanh(out[1])
+    yaw = MAX_YAW_RATE_RADPS * jnp.tanh(out[2])
     
     return jnp.array([vx, vy, yaw])
 
@@ -90,69 +103,66 @@ def jax_get_track_observation(qpos: jnp.ndarray) -> jnp.ndarray:
     w, x, y, z = qpos[3], qpos[4], qpos[5], qpos[6]
     base_yaw = jnp.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
     
-    # Standard Track Specs
-    L = 50.0
-    R = 15.9154943  # 50 / pi
-    half_width = 2.0 
-    track_length = 2.0 * L + 2.0 * jnp.pi * R
-    
-    # 1. Determine which of the 4 track segments the robot is in
-    is_bottom_straight = (base_x >= 0) & (base_x <= L) & (base_y < R)
-    is_top_straight = (base_x >= 0) & (base_x <= L) & (base_y >= R)
-    is_right_turn = (base_x > L)
-    is_left_turn = (base_x < 0)
-    
-    # 2. Bottom Straight Math
-    s_bottom = base_x
-    lat_bottom = base_y
+    straight = jnp.asarray(STRAIGHT_LENGTH_M, dtype=jnp.float32)
+    radius = jnp.asarray(TURN_RADIUS_M, dtype=jnp.float32)
+    half_width = jnp.asarray(HALF_WIDTH_M, dtype=jnp.float32)
+    track_length = jnp.asarray(TRACK_LENGTH_M, dtype=jnp.float32)
+    half_straight = straight / 2.0
+    xy = jnp.array([base_x, base_y])
+
+    x_clamped = jnp.clip(base_x, -half_straight, half_straight)
+
+    # Bottom straight projection.
+    center_bottom = jnp.array([x_clamped, -radius])
+    dist_bottom = jnp.sum(jnp.square(xy - center_bottom))
+    s_bottom = x_clamped + half_straight
     head_bottom = 0.0
     curv_bottom = 0.0
-    
-    # 3. Top Straight Math
-    s_top = L + jnp.pi * R + (L - base_x)
-    lat_top = 2.0 * R - base_y
+
+    # Top straight projection.
+    center_top = jnp.array([x_clamped, radius])
+    dist_top = jnp.sum(jnp.square(xy - center_top))
+    s_top = straight + jnp.pi * radius + (half_straight - x_clamped)
     head_top = jnp.pi
     curv_top = 0.0
-    
-    # 4. Right Turn Math
-    dx_r = base_x - L
-    dy_r = base_y - R
-    angle_r = jnp.arctan2(dy_r, dx_r)
-    s_right = L + (angle_r + jnp.pi/2.0) * R
-    dist_r = jnp.sqrt(dx_r**2 + dy_r**2)
-    lat_right = R - dist_r
-    head_right = angle_r + jnp.pi/2.0
-    curv_right = 1.0 / R
-    
-    # 5. Left Turn Math
-    dx_l = base_x - 0.0
-    dy_l = base_y - R
-    angle_l = jnp.arctan2(dy_l, dx_l)
-    angle_l_adj = jnp.where(angle_l < 0, angle_l + 2.0*jnp.pi, angle_l) # Wrap angle
-    s_left = 2.0*L + jnp.pi*R + (angle_l_adj - jnp.pi/2.0) * R
-    dist_l = jnp.sqrt(dx_l**2 + dy_l**2)
-    lat_left = R - dist_l
-    head_left = angle_l_adj + jnp.pi/2.0
-    curv_left = 1.0 / R
-    
-    # 6. Combine active segment using jnp.where
-    s = jnp.where(is_bottom_straight, s_bottom,
-          jnp.where(is_top_straight, s_top,
-            jnp.where(is_right_turn, s_right, s_left)))
-            
-    lateral_error = jnp.where(is_bottom_straight, lat_bottom,
-                      jnp.where(is_top_straight, lat_top,
-                        jnp.where(is_right_turn, lat_right, lat_left)))
-                        
-    track_heading = jnp.where(is_bottom_straight, head_bottom,
-                      jnp.where(is_top_straight, head_top,
-                        jnp.where(is_right_turn, head_right, head_left)))
-                        
-    curvature = jnp.where(is_bottom_straight, curv_bottom,
-                  jnp.where(is_top_straight, curv_top,
-                    jnp.where(is_right_turn, curv_right, curv_left)))
-                    
-    # 7. Calculate Final 5D Outputs
+
+    # Right turn projection.
+    right_center = jnp.array([half_straight, 0.0])
+    rel_right = xy - right_center
+    theta_right = jnp.clip(jnp.arctan2(rel_right[1], rel_right[0]), -jnp.pi / 2.0, jnp.pi / 2.0)
+    center_right = right_center + radius * jnp.array([jnp.cos(theta_right), jnp.sin(theta_right)])
+    dist_right = jnp.sum(jnp.square(xy - center_right))
+    s_right = straight + (theta_right + jnp.pi / 2.0) * radius
+    head_right = theta_right + jnp.pi / 2.0
+    curv_right = 1.0 / radius
+
+    # Left turn projection.
+    left_center = jnp.array([-half_straight, 0.0])
+    rel_left = xy - left_center
+    theta_left = jnp.arctan2(rel_left[1], rel_left[0])
+    theta_left = jnp.where(theta_left < jnp.pi / 2.0, theta_left + 2.0 * jnp.pi, theta_left)
+    theta_left = jnp.clip(theta_left, jnp.pi / 2.0, 3.0 * jnp.pi / 2.0)
+    center_left = left_center + radius * jnp.array([jnp.cos(theta_left), jnp.sin(theta_left)])
+    dist_left = jnp.sum(jnp.square(xy - center_left))
+    s_left = 2.0 * straight + jnp.pi * radius + (theta_left - jnp.pi / 2.0) * radius
+    head_left = theta_left + jnp.pi / 2.0
+    curv_left = 1.0 / radius
+
+    distances = jnp.array([dist_bottom, dist_right, dist_top, dist_left])
+    best_idx = jnp.argmin(distances)
+    s_values = jnp.array([s_bottom, s_right, s_top, s_left])
+    heading_values = jnp.array([head_bottom, head_right, head_top, head_left])
+    curvature_values = jnp.array([curv_bottom, curv_right, curv_top, curv_left])
+    center_values = jnp.stack([center_bottom, center_right, center_top, center_left])
+
+    s = s_values[best_idx]
+    track_heading = heading_values[best_idx]
+    curvature = curvature_values[best_idx]
+    center = center_values[best_idx]
+
+    normal = jnp.array([-jnp.sin(track_heading), jnp.cos(track_heading)])
+    lateral_error = jnp.dot(xy - center, normal)
+
     lap_fraction = (s % track_length) / track_length
     lateral_error_norm = lateral_error / half_width
     boundary_margin_norm = (half_width - jnp.abs(lateral_error)) / half_width
@@ -161,7 +171,7 @@ def jax_get_track_observation(qpos: jnp.ndarray) -> jnp.ndarray:
     heading_error = track_heading - base_yaw
     heading_error_rad = (heading_error + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
     
-    curvature_norm = curvature * R
+    curvature_norm = curvature * radius
     
     return jnp.array([
         lap_fraction, lateral_error_norm, boundary_margin_norm, 
@@ -170,9 +180,48 @@ def jax_get_track_observation(qpos: jnp.ndarray) -> jnp.ndarray:
 
 
 def jax_get_curv_norm(s_val: jnp.ndarray) -> jnp.ndarray:
-    s_mod = s_val % 200.0
-    is_turn = ((s_mod >= 50.0) & (s_mod < 100.0)) | ((s_mod >= 150.0) & (s_mod < 200.0))
+    s_mod = s_val % TRACK_LENGTH_M
+    straight = jnp.asarray(STRAIGHT_LENGTH_M, dtype=jnp.float32)
+    turn_len = jnp.pi * TURN_RADIUS_M
+    is_turn = ((s_mod >= straight) & (s_mod < straight + turn_len)) | (
+        (s_mod >= 2.0 * straight + turn_len) & (s_mod < TRACK_LENGTH_M)
+    )
     return jnp.where(is_turn, 1.0, 0.0)
+
+
+def jax_apply_stability_envelope(
+    track_obs_5d: jnp.ndarray,
+    s_current: jnp.ndarray,
+    lookahead_c2: jnp.ndarray,
+    lookahead_c5: jnp.ndarray,
+    cmd: jnp.ndarray,
+) -> jnp.ndarray:
+    del s_current
+    turn_intensity = jnp.clip(
+        jnp.maximum(jnp.maximum(jnp.abs(track_obs_5d[4]), lookahead_c2), lookahead_c5),
+        0.0,
+        1.0,
+    )
+    speed_cap = (1.0 - turn_intensity) * MAX_STRAIGHT_SPEED_MPS + turn_intensity * MAX_CURVE_SPEED_MPS
+
+    heading_risk = jnp.minimum(jnp.abs(track_obs_5d[3]) / 1.0, 1.0)
+    lateral_risk = jnp.clip((jnp.abs(track_obs_5d[1]) - 0.35) / 0.65, 0.0, 1.0)
+    edge_risk = jnp.clip(
+        (EDGE_SLOWDOWN_MARGIN_NORM - track_obs_5d[2]) / EDGE_SLOWDOWN_MARGIN_NORM,
+        0.0,
+        1.0,
+    )
+    risk_scale = jnp.clip(1.0 - 0.30 * heading_risk - 0.25 * lateral_risk - 0.35 * edge_risk, 0.35, 1.0)
+    speed_cap = speed_cap * risk_scale
+
+    return jnp.array(
+        [
+            jnp.clip(cmd[0], 0.0, speed_cap),
+            jnp.clip(cmd[1], -MAX_LATERAL_SPEED_MPS, MAX_LATERAL_SPEED_MPS),
+            jnp.clip(cmd[2], -MAX_YAW_RATE_RADPS, MAX_YAW_RATE_RADPS),
+        ],
+        dtype=jnp.float32,
+    )
 
 
 # ==========================================
@@ -217,6 +266,61 @@ def main() -> None:
     if not force_cpu:
         ll_policy = stack["jax"].jit(ll_policy)
 
+    from mujoco import mjx
+    from mujoco.mjx._src import math as mjmath
+    from mujoco_playground._src import mjx_env
+
+    start_s = float(args.start_s_m % TRACK_LENGTH_M)
+    right_turn_start = STRAIGHT_LENGTH_M
+    top_straight_start = STRAIGHT_LENGTH_M + np.pi * TURN_RADIUS_M
+    left_turn_start = 2.0 * STRAIGHT_LENGTH_M + np.pi * TURN_RADIUS_M
+    half_straight = STRAIGHT_LENGTH_M / 2.0
+    if start_s < right_turn_start:
+        start_xy = np.array([-half_straight + start_s, -TURN_RADIUS_M], dtype=np.float32)
+        start_heading = 0.0
+    elif start_s < top_straight_start:
+        theta = -np.pi / 2.0 + (start_s - right_turn_start) / TURN_RADIUS_M
+        start_xy = np.array([half_straight, 0.0], dtype=np.float32) + TURN_RADIUS_M * np.array(
+            [np.cos(theta), np.sin(theta)], dtype=np.float32
+        )
+        start_heading = theta + np.pi / 2.0
+    elif start_s < left_turn_start:
+        u = start_s - top_straight_start
+        start_xy = np.array([half_straight - u, TURN_RADIUS_M], dtype=np.float32)
+        start_heading = np.pi
+    else:
+        theta = np.pi / 2.0 + (start_s - left_turn_start) / TURN_RADIUS_M
+        start_xy = np.array([-half_straight, 0.0], dtype=np.float32) + TURN_RADIUS_M * np.array(
+            [np.cos(theta), np.sin(theta)], dtype=np.float32
+        )
+        start_heading = theta + np.pi / 2.0
+
+    def reset_lowlevel_on_track(rng_key):
+        state = env.reset(rng_key)
+        qpos = env._init_q
+        qvel = jnp.zeros(env.mjx_model.nv)
+        quat = mjmath.axis_angle_to_quat(
+            jnp.array([0.0, 0.0, 1.0], dtype=jnp.float32),
+            jnp.asarray(start_heading, dtype=jnp.float32),
+        )
+        qpos = qpos.at[0:2].set(jnp.asarray(start_xy, dtype=jnp.float32))
+        qpos = qpos.at[3:7].set(quat)
+
+        data = mjx_env.make_data(
+            env.mj_model,
+            qpos=qpos,
+            qvel=qvel,
+            ctrl=qpos[7:],
+            impl=env.mjx_model.impl.value,
+            naconmax=env._config.naconmax,
+            njmax=env._config.njmax,
+        )
+        data = mjx.forward(env.mjx_model, data)
+        state.info["command"] = jnp.zeros(3, dtype=jnp.float32)
+        state.info["steps_until_next_cmd"] = jnp.array(10**9, dtype=jnp.int32)
+        obs = env._get_obs(data, state.info)
+        return state.replace(data=data, obs=obs, reward=jnp.zeros(()), done=jnp.zeros(()))
+
     # ==========================================
     # 3. BUILD VMAP ROLLOUT ENGINE (WITH EXPANDED INPUTS & SMOOTHING)
     # ==========================================
@@ -242,10 +346,12 @@ def main() -> None:
         ])
         
         cmd_raw = jax_mlp_forward(hl_weights, track_obs_8d)
+        cmd_raw = jax_apply_stability_envelope(track_obs_5d, s_current, c2, c5, cmd_raw)
         
         # --- STRATEGY 5: MATCHING EXPO GAIN RATE FILTER ---
-        alpha = 0.20
-        cmd = alpha * cmd_raw + (1.0 - alpha) * last_cmd
+        cmd = COMMAND_FILTER_ALPHA * cmd_raw + (1.0 - COMMAND_FILTER_ALPHA) * last_cmd
+        cmd_delta = jnp.clip(cmd - last_cmd, -MAX_COMMAND_DELTA, MAX_COMMAND_DELTA)
+        cmd = last_cmd + cmd_delta
         
         # Override during stand-up phase
         cmd = jnp.where(is_standing, jnp.zeros_like(cmd), cmd)
@@ -271,7 +377,7 @@ def main() -> None:
         track_length = 200.0
 
         def scan_step(carry, step_idx):
-            current_states, prev_s, cum_dist, prev_real_s_batch, last_cmd_batch = carry
+            current_states, prev_s, cum_dist, prev_real_s_batch, last_cmd_batch, alive_batch = carry
             
             is_standing = (step_idx * ctrl_dt) < 1.0
             
@@ -283,28 +389,39 @@ def main() -> None:
             delta_s = s_next - prev_s
             delta_s = jnp.where(delta_s < -track_length / 2.0, delta_s + track_length, delta_s)
             delta_s = jnp.where(delta_s > track_length / 2.0, delta_s - track_length, delta_s)
-            delta_s = jnp.where(is_standing, 0.0, delta_s)
+            delta_s = jnp.where(is_standing | ~alive_batch, 0.0, delta_s)
             
             next_cum_dist = cum_dist + delta_s
             step_lateral_errors = jnp.abs(next_track_obs_batch[:, 1])
             
             z_height = next_states.data.qpos[:, 2]
             has_fallen = z_height < 0.23  
+            boundary_violation = next_track_obs_batch[:, 2] < 0.0
+            terminal = has_fallen | boundary_violation
+            next_alive_batch = alive_batch & ~terminal
             
-            return (next_states, s_next, next_cum_dist, current_real_s, next_cmd_batch), (next_cum_dist, step_lateral_errors, has_fallen)
+            return (
+                next_states,
+                s_next,
+                next_cum_dist,
+                current_real_s,
+                next_cmd_batch,
+                next_alive_batch,
+            ), (next_cum_dist, step_lateral_errors, has_fallen, boundary_violation, next_alive_batch)
 
         # Initialize trackers
         init_obs = jax.vmap(jax_get_track_observation)(initial_states_batch.data.qpos)
         init_s = init_obs[:, 0] * track_length
         init_cum_dist = jnp.zeros(args.population)
         init_cmd = jnp.zeros((args.population, 3))
+        init_alive = jnp.ones(args.population, dtype=bool)
         
-        init_carry = (initial_states_batch, init_s, init_cum_dist, init_s, init_cmd)
+        init_carry = (initial_states_batch, init_s, init_cum_dist, init_s, init_cmd, init_alive)
         
-        _, (all_cum_dists, all_lateral_errors, all_has_fallen) = jax.lax.scan(
+        _, (all_cum_dists, all_lateral_errors, all_has_fallen, all_boundary_violations, all_alive) = jax.lax.scan(
             scan_step, init_carry, jnp.arange(num_steps)
         )
-        return all_cum_dists, all_lateral_errors, all_has_fallen
+        return all_cum_dists, all_lateral_errors, all_has_fallen, all_boundary_violations, all_alive
     
     main_rng = jax.random.PRNGKey(args.seed)
 
@@ -336,26 +453,35 @@ def main() -> None:
 
         main_rng, reset_rng = jax.random.split(main_rng)
         batch_keys = jax.random.split(reset_rng, args.population)
-        initial_states_batch = jax.vmap(env.reset)(batch_keys)
+        initial_states_batch = jax.vmap(reset_lowlevel_on_track)(batch_keys)
 
-        all_cum_dists, all_lateral_errors, all_has_fallen = batch_rollout(initial_states_batch, batch_weights, batch_keys)
+        (
+            all_cum_dists,
+            all_lateral_errors,
+            all_has_fallen,
+            all_boundary_violations,
+            all_alive,
+        ) = batch_rollout(initial_states_batch, batch_weights, batch_keys)
         
         # --- STRATEGY 4: CONTINUOUS, SMOOTH OPTIMIZATION LANDSCAPE SCORING ---
         track_length = 200.0
-        max_unwrapped_lap = jnp.max(all_cum_dists, axis=0) / track_length
+        final_unwrapped_lap = all_cum_dists[-1] / track_length
         mean_lateral_error = jnp.mean(all_lateral_errors, axis=0)
         
-        progress_score = max_unwrapped_lap * 20.0
+        progress_score = final_unwrapped_lap * 20.0
         lateral_penalty = 1.5 * mean_lateral_error
-        survival_rate = jnp.mean(1.0 - all_has_fallen.astype(jnp.float32), axis=0)
-        survival_bonus = jnp.where(max_unwrapped_lap > 0.01, 1.0 * survival_rate, 0.0)
+        alive_rate = jnp.mean(all_alive.astype(jnp.float32), axis=0)
+        survival_bonus = jnp.where(final_unwrapped_lap > 0.01, 1.0 * alive_rate, 0.0)
         
         # Smooth boundaries instead of hard threshold cuts
         max_lateral = jnp.max(jnp.abs(all_lateral_errors), axis=0)
         boundary_penalty = jnp.where(max_lateral > 1.0, 8.0 * (max_lateral - 1.0) + 2.0, 0.0)
-        fall_penalty = jnp.where(survival_rate < 1.0, 15.0 * (1.0 - survival_rate), 0.0)
+        fall_rate = jnp.mean(all_has_fallen.astype(jnp.float32), axis=0)
+        boundary_rate = jnp.mean(all_boundary_violations.astype(jnp.float32), axis=0)
+        fall_penalty = jnp.where(fall_rate > 0.0, 15.0 * fall_rate, 0.0)
+        terminal_penalty = 12.0 * boundary_rate
         
-        scores = progress_score - lateral_penalty + survival_bonus - boundary_penalty - fall_penalty
+        scores = progress_score - lateral_penalty + survival_bonus - boundary_penalty - fall_penalty - terminal_penalty
         scores = np.array(scores)
 
         # Save Best Candidate and Metadata
@@ -371,7 +497,14 @@ def main() -> None:
                 "planner_type": "learned_mlp", 
                 "weights_path": "planner_weights.npz", 
                 "stand_seconds": 1.0,
-                "hidden_dim": hidden_dim
+                "hidden_dim": hidden_dim,
+                "command_filter_alpha": COMMAND_FILTER_ALPHA,
+                "max_straight_speed_mps": MAX_STRAIGHT_SPEED_MPS,
+                "max_curve_speed_mps": MAX_CURVE_SPEED_MPS,
+                "max_lateral_speed_mps": MAX_LATERAL_SPEED_MPS,
+                "max_yaw_rate_radps": MAX_YAW_RATE_RADPS,
+                "edge_slowdown_margin_norm": EDGE_SLOWDOWN_MARGIN_NORM,
+                "max_command_delta": MAX_COMMAND_DELTA
             }
             (args.output_dir / "planner_config.json").write_text(json.dumps(config_payload, indent=2))
             
