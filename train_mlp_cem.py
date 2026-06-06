@@ -37,6 +37,7 @@ MAX_LATERAL_SPEED_MPS = 0.25
 MAX_YAW_RATE_RADPS = 0.60
 EDGE_SLOWDOWN_MARGIN_NORM = 0.40
 MAX_COMMAND_DELTA = 0.15
+BOUNDARY_SAFETY_MARGIN_M = 0.15
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -396,7 +397,7 @@ def main() -> None:
             
             z_height = next_states.data.qpos[:, 2]
             has_fallen = z_height < 0.23  
-            boundary_violation = next_track_obs_batch[:, 2] < 0.0
+            boundary_violation = next_track_obs_batch[:, 2] < (BOUNDARY_SAFETY_MARGIN_M / HALF_WIDTH_M)
             terminal = has_fallen | boundary_violation
             next_alive_batch = alive_batch & ~terminal
             
@@ -407,7 +408,7 @@ def main() -> None:
                 current_real_s,
                 next_cmd_batch,
                 next_alive_batch,
-            ), (next_cum_dist, step_lateral_errors, has_fallen, boundary_violation, next_alive_batch)
+            ), (next_cum_dist, delta_s, step_lateral_errors, has_fallen, boundary_violation, next_alive_batch)
 
         # Initialize trackers
         init_obs = jax.vmap(jax_get_track_observation)(initial_states_batch.data.qpos)
@@ -418,10 +419,17 @@ def main() -> None:
         
         init_carry = (initial_states_batch, init_s, init_cum_dist, init_s, init_cmd, init_alive)
         
-        _, (all_cum_dists, all_lateral_errors, all_has_fallen, all_boundary_violations, all_alive) = jax.lax.scan(
+        _, (
+            all_cum_dists,
+            all_step_dists,
+            all_lateral_errors,
+            all_has_fallen,
+            all_boundary_violations,
+            all_alive,
+        ) = jax.lax.scan(
             scan_step, init_carry, jnp.arange(num_steps)
         )
-        return all_cum_dists, all_lateral_errors, all_has_fallen, all_boundary_violations, all_alive
+        return all_cum_dists, all_step_dists, all_lateral_errors, all_has_fallen, all_boundary_violations, all_alive
     
     main_rng = jax.random.PRNGKey(args.seed)
 
@@ -457,32 +465,48 @@ def main() -> None:
 
         (
             all_cum_dists,
+            all_step_dists,
             all_lateral_errors,
             all_has_fallen,
             all_boundary_violations,
             all_alive,
         ) = batch_rollout(initial_states_batch, batch_weights, batch_keys)
         
-        # --- STRATEGY 4: CONTINUOUS, SMOOTH OPTIMIZATION LANDSCAPE SCORING ---
+        # Official-like score: reward completion, line keeping, stability, and
+        # useful speed, while strongly rejecting candidates that stall early.
         track_length = 200.0
         final_unwrapped_lap = all_cum_dists[-1] / track_length
-        mean_lateral_error = jnp.mean(all_lateral_errors, axis=0)
-        
-        progress_score = final_unwrapped_lap * 20.0
-        lateral_penalty = 1.5 * mean_lateral_error
-        alive_rate = jnp.mean(all_alive.astype(jnp.float32), axis=0)
-        survival_bonus = jnp.where(final_unwrapped_lap > 0.01, 1.0 * alive_rate, 0.0)
-        
-        # Smooth boundaries instead of hard threshold cuts
-        max_lateral = jnp.max(jnp.abs(all_lateral_errors), axis=0)
-        boundary_penalty = jnp.where(max_lateral > 1.0, 8.0 * (max_lateral - 1.0) + 2.0, 0.0)
-        fall_rate = jnp.mean(all_has_fallen.astype(jnp.float32), axis=0)
-        boundary_rate = jnp.mean(all_boundary_violations.astype(jnp.float32), axis=0)
-        fall_penalty = jnp.where(fall_rate > 0.0, 15.0 * fall_rate, 0.0)
-        terminal_penalty = 12.0 * boundary_rate
-        
-        scores = progress_score - lateral_penalty + survival_bonus - boundary_penalty - fall_penalty - terminal_penalty
+        lap_completion = jnp.clip(final_unwrapped_lap, 0.0, 1.0)
+        total_time = num_steps * ctrl_dt
+        mean_progress_speed = jnp.clip(all_cum_dists[-1], 0.0, track_length) / total_time
+
+        lateral_m = jnp.abs(all_lateral_errors) * HALF_WIDTH_M
+        rms_lateral_m = jnp.sqrt(jnp.mean(jnp.square(lateral_m), axis=0))
+        max_lateral_m = jnp.max(lateral_m, axis=0)
+        line_score = 0.5 * jnp.clip((1.5 - rms_lateral_m) / (1.5 - 0.25), 0.0, 1.0)
+        line_score += 0.5 * jnp.clip(((HALF_WIDTH_M - BOUNDARY_SAFETY_MARGIN_M) - max_lateral_m) / ((HALF_WIDTH_M - BOUNDARY_SAFETY_MARGIN_M) - 0.75), 0.0, 1.0)
+
+        speed_score = jnp.clip((mean_progress_speed - 0.15) / (0.9 - 0.15), 0.0, 1.0)
+        fell = jnp.any(all_has_fallen, axis=0)
+        boundary_hit = jnp.any(all_boundary_violations, axis=0)
+        stability_score = jnp.ones_like(lap_completion)
+        stability_score = jnp.where(fell, stability_score * 0.35, stability_score)
+        stability_score = jnp.where(boundary_hit, stability_score * 0.25, stability_score)
+
+        recent_window = min(num_steps, max(1, int(round(2.0 / ctrl_dt))))
+        recent_speed = jnp.sum(all_step_dists[-recent_window:], axis=0) / (recent_window * ctrl_dt)
+        stall_penalty = jnp.where((lap_completion < 0.98) & (recent_speed < 0.05), 20.0, 0.0)
+
+        scores = 45.0 * lap_completion + 20.0 * speed_score + 20.0 * line_score + 10.0 * stability_score
+        scores = jnp.where(fell | boundary_hit, scores * 0.55, scores)
+        scores = scores - stall_penalty
+
         scores = np.array(scores)
+        lap_completion_np = np.array(lap_completion)
+        mean_progress_speed_np = np.array(mean_progress_speed)
+        recent_speed_np = np.array(recent_speed)
+        fell_np = np.array(fell)
+        boundary_hit_np = np.array(boundary_hit)
 
         # Save Best Candidate and Metadata
         best_idx = int(np.argmax(scores))
@@ -504,12 +528,20 @@ def main() -> None:
                 "max_lateral_speed_mps": MAX_LATERAL_SPEED_MPS,
                 "max_yaw_rate_radps": MAX_YAW_RATE_RADPS,
                 "edge_slowdown_margin_norm": EDGE_SLOWDOWN_MARGIN_NORM,
-                "max_command_delta": MAX_COMMAND_DELTA
+                "max_command_delta": MAX_COMMAND_DELTA,
+                "boundary_safety_margin_m": BOUNDARY_SAFETY_MARGIN_M
             }
             (args.output_dir / "planner_config.json").write_text(json.dumps(config_payload, indent=2))
             
             (args.output_dir / "best_score.json").write_text(json.dumps({
-                "score": float(best_score), "iteration": iteration, "candidate": best_idx
+                "score": float(best_score),
+                "iteration": iteration,
+                "candidate": best_idx,
+                "lap_completion": float(lap_completion_np[best_idx]),
+                "mean_progress_speed": float(mean_progress_speed_np[best_idx]),
+                "recent_speed": float(recent_speed_np[best_idx]),
+                "fall": bool(fell_np[best_idx]),
+                "boundary_violation": bool(boundary_hit_np[best_idx]),
             }, indent=2))
 
         # Fit next generation distributions
@@ -520,13 +552,26 @@ def main() -> None:
         sigma = np.std(elites_arr, axis=0) + max(0.01, 0.1 * (0.85 ** iteration))
         
         dt = time.time() - t0
-        print(f"[Gen {iteration:02d}] Best Gen Score: {gen_best_score:.3f} | Best Global: {best_score:.3f} | Step Time: {dt:.3f}s")
+        print(
+            f"[Gen {iteration:02d}] Best Gen Score: {gen_best_score:.3f} | "
+            f"Best Global: {best_score:.3f} | "
+            f"Lap: {100.0 * lap_completion_np[best_idx]:.1f}% | "
+            f"Mean Speed: {mean_progress_speed_np[best_idx]:.2f} m/s | "
+            f"Recent Speed: {recent_speed_np[best_idx]:.2f} m/s | "
+            f"Fall: {bool(fell_np[best_idx])} | Boundary: {bool(boundary_hit_np[best_idx])} | "
+            f"Step Time: {dt:.3f}s"
+        )
         
         history.append({
             "iteration": iteration,
             "mean_score": float(np.mean(scores)),
             "max_score": float(np.max(scores)),
-            "best_global": float(best_score)
+            "best_global": float(best_score),
+            "best_lap_completion": float(lap_completion_np[best_idx]),
+            "best_mean_progress_speed": float(mean_progress_speed_np[best_idx]),
+            "best_recent_speed": float(recent_speed_np[best_idx]),
+            "best_fall": bool(fell_np[best_idx]),
+            "best_boundary_violation": bool(boundary_hit_np[best_idx]),
         })
         (args.output_dir / "history.json").write_text(json.dumps(history, indent=2))
 
