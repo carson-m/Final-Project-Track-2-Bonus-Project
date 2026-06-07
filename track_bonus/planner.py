@@ -110,16 +110,22 @@ class PPOPlannerConfig:
     num_hidden_layers: int = 2
     command_filter_alpha: float = 0.30
     max_straight_speed_mps: float = 2.50
-    max_lateral_speed_mps: float = 0.24
-    max_yaw_rate_radps: float = 0.65
+    max_lateral_speed_mps: float = 0.30
+    max_yaw_rate_radps: float = 0.80
     edge_slowdown_margin_norm: float = 0.35
-    max_command_delta: float = 0.12
+    max_command_delta: float = 0.18
     use_stability_envelope: bool = True
     heading_speed_penalty: float = 0.20
     lateral_speed_penalty: float = 0.25
     edge_speed_penalty: float = 0.35
-    turn_speed_penalty: float = 0.20
-    min_speed_cap_scale: float = 0.30
+    turn_speed_penalty: float = 0.10
+    min_speed_cap_scale: float = 0.45
+    use_racing_line: bool = True
+    max_line_bias_norm: float = 0.50
+    line_vy_gain: float = 0.22
+    line_yaw_gain: float = 0.28
+    max_line_vy: float = 0.18
+    max_line_yaw: float = 0.24
     track_length_m: float = 200.0
     turn_radius_m: float = 18.25
     half_width_m: float = 2.0
@@ -153,6 +159,12 @@ class PPOPlannerConfig:
             "edge_speed_penalty": self.edge_speed_penalty,
             "turn_speed_penalty": self.turn_speed_penalty,
             "min_speed_cap_scale": self.min_speed_cap_scale,
+            "use_racing_line": self.use_racing_line,
+            "max_line_bias_norm": self.max_line_bias_norm,
+            "line_vy_gain": self.line_vy_gain,
+            "line_yaw_gain": self.line_yaw_gain,
+            "max_line_vy": self.max_line_vy,
+            "max_line_yaw": self.max_line_yaw,
             "track_length_m": self.track_length_m,
             "turn_radius_m": self.turn_radius_m,
             "half_width_m": self.half_width_m,
@@ -339,6 +351,11 @@ class StarterTrackPlanner:
             raise KeyError("Missing PPO planner output weights: w_out/b_out")
         out = np.dot(h, self.weights["w_out"]) + self.weights["b_out"]
 
+        line_bias_norm = 0.0
+        if bool(self.config.use_racing_line) and np.asarray(out).shape[0] >= 4:
+            turn_gate = float(np.clip(abs(float(obs.curvature_norm)), 0.0, 1.0))
+            line_bias_norm = float(self.config.max_line_bias_norm) * float(np.tanh(out[3])) * turn_gate
+
         cmd_raw = np.array(
             [
                 0.5 * float(self.config.max_straight_speed_mps) * (np.tanh(out[0]) + 1.0),
@@ -347,6 +364,23 @@ class StarterTrackPlanner:
             ],
             dtype=np.float32,
         )
+
+        if bool(self.config.use_racing_line):
+            line_error_norm = float(obs.lateral_error_norm) - line_bias_norm
+            cmd_raw[1] += float(
+                np.clip(
+                    -float(self.config.line_vy_gain) * line_error_norm,
+                    -float(self.config.max_line_vy),
+                    float(self.config.max_line_vy),
+                )
+            )
+            cmd_raw[2] += float(
+                np.clip(
+                    -float(self.config.line_yaw_gain) * line_error_norm,
+                    -float(self.config.max_line_yaw),
+                    float(self.config.max_line_yaw),
+                )
+            )
 
         s = float(obs.lap_fraction) * float(self.track.length_m)
         if bool(self.config.use_stability_envelope):

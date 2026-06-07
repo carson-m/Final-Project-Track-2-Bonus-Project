@@ -74,29 +74,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-hidden-layers", type=int, default=2)
     parser.add_argument("--start-max-vx", type=float, default=1.25)
     parser.add_argument("--max-vx", type=float, default=2.50)
-    parser.add_argument("--max-vy", type=float, default=0.24)
-    parser.add_argument("--max-yaw-rate", type=float, default=0.65)
-    parser.add_argument("--command-filter-alpha", type=float, default=0.30)
-    parser.add_argument("--max-command-delta", type=float, default=0.12)
+    parser.add_argument("--max-vy", type=float, default=0.30)
+    parser.add_argument("--max-yaw-rate", type=float, default=0.80)
+    parser.add_argument("--command-filter-alpha", type=float, default=0.38)
+    parser.add_argument("--max-command-delta", type=float, default=0.18)
     parser.add_argument("--edge-slowdown-margin-norm", type=float, default=0.35)
     parser.add_argument("--stand-seconds", type=float, default=1.0)
     parser.add_argument("--max-episode-seconds", type=float, default=240.0)
     parser.add_argument("--start-target-straight-speed", type=float, default=1.10)
     parser.add_argument("--target-straight-speed", type=float, default=2.50)
     parser.add_argument("--start-target-curve-speed", type=float, default=0.70)
-    parser.add_argument("--target-curve-speed", type=float, default=1.80)
-    parser.add_argument("--speed-curriculum-updates", type=int, default=100)
-    parser.add_argument("--speed-curriculum-warmup-updates", type=int, default=5)
-    parser.add_argument("--progress-reward-scale", type=float, default=12.0)
-    parser.add_argument("--speed-reward-scale", type=float, default=0.08)
-    parser.add_argument("--target-speed-reward-scale", type=float, default=0.10)
-    parser.add_argument("--slow-penalty-scale", type=float, default=0.08)
+    parser.add_argument("--target-curve-speed", type=float, default=2.20)
+    parser.add_argument("--speed-curriculum-updates", type=int, default=80)
+    parser.add_argument("--speed-curriculum-warmup-updates", type=int, default=2)
+    parser.add_argument("--progress-reward-scale", type=float, default=22.0)
+    parser.add_argument("--speed-reward-scale", type=float, default=0.20)
+    parser.add_argument("--target-speed-reward-scale", type=float, default=0.30)
+    parser.add_argument("--curve-speed-reward-scale", type=float, default=0.20)
+    parser.add_argument("--slow-penalty-scale", type=float, default=0.18)
     parser.add_argument("--backward-penalty-scale", type=float, default=0.40)
     parser.add_argument("--heading-speed-penalty", type=float, default=0.20)
     parser.add_argument("--lateral-speed-penalty", type=float, default=0.25)
     parser.add_argument("--edge-speed-penalty", type=float, default=0.35)
-    parser.add_argument("--turn-speed-penalty", type=float, default=0.20)
-    parser.add_argument("--min-speed-cap-scale", type=float, default=0.30)
+    parser.add_argument("--turn-speed-penalty", type=float, default=0.10)
+    parser.add_argument("--min-speed-cap-scale", type=float, default=0.45)
+    parser.add_argument("--use-racing-line", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--max-line-bias-norm", type=float, default=0.50)
+    parser.add_argument("--line-vy-gain", type=float, default=0.22)
+    parser.add_argument("--line-yaw-gain", type=float, default=0.28)
+    parser.add_argument("--max-line-vy", type=float, default=0.18)
+    parser.add_argument("--max-line-yaw", type=float, default=0.24)
+    parser.add_argument("--line-lateral-weight", type=float, default=0.18)
+    parser.add_argument("--center-lateral-weight", type=float, default=0.01)
+    parser.add_argument("--line-bias-penalty", type=float, default=0.015)
 
     parser.add_argument("--start-randomization", choices=["fixed", "full_track", "curriculum"], default="curriculum")
     parser.add_argument("--start-s-m", type=float, default=0.0)
@@ -108,8 +118,9 @@ def parse_args() -> argparse.Namespace:
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int, hidden_dim: int, num_hidden_layers: int) -> None:
+    def __init__(self, obs_dim: int, hidden_dim: int, num_hidden_layers: int, action_dim: int = 3) -> None:
         super().__init__()
+        self.action_dim = int(action_dim)
         layers: list[nn.Module] = []
         in_dim = obs_dim
         for _ in range(num_hidden_layers):
@@ -117,7 +128,7 @@ class ActorCritic(nn.Module):
             layers.append(nn.Tanh())
             in_dim = hidden_dim
         self.actor_body = nn.Sequential(*layers)
-        self.actor_mean = nn.Linear(in_dim, 3)
+        self.actor_mean = nn.Linear(in_dim, self.action_dim)
 
         value_layers: list[nn.Module] = []
         in_dim = obs_dim
@@ -128,7 +139,7 @@ class ActorCritic(nn.Module):
         value_layers.append(nn.Linear(in_dim, 1))
         self.value_net = nn.Sequential(*value_layers)
 
-        self.log_std = nn.Parameter(torch.full((3,), -0.45))
+        self.log_std = nn.Parameter(torch.full((self.action_dim,), -0.45))
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -139,6 +150,8 @@ class ActorCritic(nn.Module):
         nn.init.orthogonal_(self.actor_mean.weight, gain=0.01)
         with torch.no_grad():
             self.actor_mean.bias[0].fill_(0.5)
+            if self.action_dim > 3:
+                self.actor_mean.bias[3:].zero_()
 
     def actor_forward(self, obs: torch.Tensor) -> torch.Tensor:
         return self.actor_mean(self.actor_body(obs))
@@ -177,6 +190,40 @@ def raw_action_to_command(raw_action: np.ndarray, *, max_vx: float, max_vy: floa
         ],
         axis=-1,
     ).astype(np.float32)
+
+
+def raw_action_to_line_bias(raw_action: np.ndarray, obs: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    raw_action = np.asarray(raw_action, dtype=np.float32)
+    if not bool(args.use_racing_line) or raw_action.shape[-1] < 4:
+        return np.zeros(raw_action.shape[0], dtype=np.float32)
+    turn_gate = np.clip(np.abs(np.asarray(obs, dtype=np.float32)[:, 4]), 0.0, 1.0)
+    bias = float(args.max_line_bias_norm) * np.tanh(raw_action[:, 3]) * turn_gate
+    return bias.astype(np.float32)
+
+
+def apply_racing_line_command_bias(
+    command: np.ndarray,
+    obs: np.ndarray,
+    line_bias_norm: np.ndarray,
+    args: argparse.Namespace,
+) -> np.ndarray:
+    if not bool(args.use_racing_line):
+        return command
+    command = np.asarray(command, dtype=np.float32).copy()
+    line_error_norm = np.asarray(obs, dtype=np.float32)[:, 1] - np.asarray(line_bias_norm, dtype=np.float32)
+    vy_bias = np.clip(
+        -float(args.line_vy_gain) * line_error_norm,
+        -float(args.max_line_vy),
+        float(args.max_line_vy),
+    )
+    yaw_bias = np.clip(
+        -float(args.line_yaw_gain) * line_error_norm,
+        -float(args.max_line_yaw),
+        float(args.max_line_yaw),
+    )
+    command[:, 1] += vy_bias
+    command[:, 2] += yaw_bias
+    return command.astype(np.float32)
 
 
 def smoothstep(value: float) -> float:
@@ -527,6 +574,8 @@ class JaxTrackBatchEnv:
             max_vy=float(self.args.max_vy),
             max_yaw_rate=float(self.args.max_yaw_rate),
         )
+        line_bias_norm = raw_action_to_line_bias(raw_action, self.obs, self.args)
+        command = apply_racing_line_command_bias(command, self.obs, line_bias_norm, self.args)
         command = apply_stability_envelope(command, self.obs, self.args, max_vx=float(speed_cfg["max_vx"]))
         warmup = self.episode_step < self.stand_steps
         command[warmup] = 0.0
@@ -559,6 +608,8 @@ class JaxTrackBatchEnv:
             slip = np.zeros(self.num_envs, dtype=np.float32)
 
         lateral_m = np.abs(next_obs[:, 1]) * HALF_WIDTH_M
+        line_error_norm = next_obs[:, 1] - line_bias_norm
+        line_error_m = line_error_norm * HALF_WIDTH_M
         heading_abs = np.abs(next_obs[:, 3])
         margin_m = next_obs[:, 2] * HALF_WIDTH_M
         turn_intensity = np.clip(np.abs(next_obs[:, 4]), 0.0, 1.0)
@@ -581,10 +632,17 @@ class JaxTrackBatchEnv:
         reward = float(self.args.progress_reward_scale) * delta_s
         reward += float(self.args.speed_reward_scale) * np.clip(progress_speed, -0.5, float(speed_cfg["max_vx"]))
         reward += float(self.args.target_speed_reward_scale) * speed_fraction
+        reward += float(self.args.curve_speed_reward_scale) * turn_intensity * np.clip(
+            progress_speed,
+            0.0,
+            float(speed_cfg["max_vx"]),
+        )
         reward -= float(self.args.slow_penalty_scale) * slow_gap
         reward -= float(self.args.backward_penalty_scale) * backward_speed
         reward += 0.02 * np.clip(next_obs[:, 2], 0.0, 1.0)
-        reward -= 0.35 * np.square(lateral_m)
+        reward -= float(self.args.line_lateral_weight) * np.square(line_error_m)
+        reward -= float(self.args.center_lateral_weight) * np.square(lateral_m)
+        reward -= float(self.args.line_bias_penalty) * np.square(line_bias_norm)
         reward -= 0.08 * np.square(heading_abs)
         reward -= 0.025 * np.sum(np.square(command - self.last_cmd), axis=1)
         reward -= 0.00002 * np.square(accel_proxy)
@@ -620,6 +678,9 @@ class JaxTrackBatchEnv:
             "mean_done_distance": mean_done_distance,
             "mean_done_return": mean_done_return,
             "mean_lateral_m": float(np.mean(lateral_m)),
+            "mean_line_error_m": float(np.mean(np.abs(line_error_m))),
+            "mean_line_bias_norm": float(np.mean(line_bias_norm)),
+            "mean_abs_line_bias_norm": float(np.mean(np.abs(line_bias_norm))),
             "mean_margin_m": float(np.mean(margin_m)),
             "mean_progress_speed": float(np.mean(progress_speed)),
             "mean_target_speed": float(np.mean(target_speed)),
@@ -695,6 +756,12 @@ def export_numpy_planner(
         "edge_speed_penalty": float(args.edge_speed_penalty),
         "turn_speed_penalty": float(args.turn_speed_penalty),
         "min_speed_cap_scale": float(args.min_speed_cap_scale),
+        "use_racing_line": bool(args.use_racing_line),
+        "max_line_bias_norm": float(args.max_line_bias_norm),
+        "line_vy_gain": float(args.line_vy_gain),
+        "line_yaw_gain": float(args.line_yaw_gain),
+        "max_line_vy": float(args.max_line_vy),
+        "max_line_yaw": float(args.max_line_yaw),
         "track_length_m": TRACK_LENGTH_M,
         "turn_radius_m": TURN_RADIUS_M,
         "half_width_m": HALF_WIDTH_M,
@@ -744,7 +811,13 @@ def main() -> None:
     (output_dir / "training_args.json").write_text(json.dumps(vars(args), indent=2, default=str), encoding="utf-8")
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.force_cpu else "cpu")
-    model = ActorCritic(obs_dim=5, hidden_dim=int(args.hidden_dim), num_hidden_layers=int(args.num_hidden_layers)).to(device)
+    action_dim = 4 if bool(args.use_racing_line) and float(args.max_line_bias_norm) > 0.0 else 3
+    model = ActorCritic(
+        obs_dim=5,
+        hidden_dim=int(args.hidden_dim),
+        num_hidden_layers=int(args.num_hidden_layers),
+        action_dim=action_dim,
+    ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(args.learning_rate), eps=1e-5)
     env = JaxTrackBatchEnv(args)
     obs = env.reset(update_idx=0)
@@ -756,6 +829,7 @@ def main() -> None:
                 "device": str(device),
                 "num_envs": int(args.num_envs),
                 "rollout_steps": int(args.rollout_steps),
+                "action_dim": int(action_dim),
                 "dt": env.dt,
                 "output_dir": str(output_dir),
             },
@@ -767,7 +841,7 @@ def main() -> None:
     for update_idx in range(1, int(args.total_updates) + 1):
         t0 = time.time()
         obs_buf = np.zeros((args.rollout_steps, args.num_envs, 5), dtype=np.float32)
-        action_buf = np.zeros((args.rollout_steps, args.num_envs, 3), dtype=np.float32)
+        action_buf = np.zeros((args.rollout_steps, args.num_envs, action_dim), dtype=np.float32)
         logprob_buf = np.zeros((args.rollout_steps, args.num_envs), dtype=np.float32)
         reward_buf = np.zeros((args.rollout_steps, args.num_envs), dtype=np.float32)
         done_buf = np.zeros((args.rollout_steps, args.num_envs), dtype=np.float32)
@@ -803,7 +877,7 @@ def main() -> None:
         )
 
         batch_obs = torch.as_tensor(obs_buf.reshape(-1, 5), dtype=torch.float32, device=device)
-        batch_actions = torch.as_tensor(action_buf.reshape(-1, 3), dtype=torch.float32, device=device)
+        batch_actions = torch.as_tensor(action_buf.reshape(-1, action_dim), dtype=torch.float32, device=device)
         batch_old_logprob = torch.as_tensor(logprob_buf.reshape(-1), dtype=torch.float32, device=device)
         batch_returns = torch.as_tensor(returns.reshape(-1), dtype=torch.float32, device=device)
         batch_adv = torch.as_tensor(advantages.reshape(-1), dtype=torch.float32, device=device)
@@ -862,6 +936,9 @@ def main() -> None:
             "done_count": sum(item["done_count"] for item in rollout_infos),
             "finished_count": sum(item["finished_count"] for item in rollout_infos),
             "mean_lateral_m": float(np.mean([item["mean_lateral_m"] for item in rollout_infos])),
+            "mean_line_error_m": float(np.mean([item["mean_line_error_m"] for item in rollout_infos])),
+            "mean_line_bias_norm": float(np.mean([item["mean_line_bias_norm"] for item in rollout_infos])),
+            "mean_abs_line_bias_norm": float(np.mean([item["mean_abs_line_bias_norm"] for item in rollout_infos])),
             "mean_margin_m": float(np.mean([item["mean_margin_m"] for item in rollout_infos])),
             "mean_progress_speed": float(np.mean([item["mean_progress_speed"] for item in rollout_infos])),
             "mean_target_speed": float(np.mean([item["mean_target_speed"] for item in rollout_infos])),
@@ -898,6 +975,9 @@ def main() -> None:
             "mean_done_distance": float(np.mean(done_distances)) if done_distances else 0.0,
             "mean_done_return": float(np.mean(done_returns)) if done_returns else 0.0,
             "mean_lateral_m": info_sum["mean_lateral_m"],
+            "mean_line_error_m": info_sum["mean_line_error_m"],
+            "mean_line_bias_norm": info_sum["mean_line_bias_norm"],
+            "mean_abs_line_bias_norm": info_sum["mean_abs_line_bias_norm"],
             "mean_margin_m": info_sum["mean_margin_m"],
             "mean_progress_speed": info_sum["mean_progress_speed"],
             "mean_target_speed": info_sum["mean_target_speed"],
@@ -930,6 +1010,7 @@ def main() -> None:
             f"speed={record['mean_progress_speed']:.2f}/{record['mean_target_speed']:.2f}m/s "
             f"cap={record['current_max_vx']:.2f} curr={record['curriculum_fraction']:.2f} "
             f"lateral={record['mean_lateral_m']:.2f}m "
+            f"line={record['mean_abs_line_bias_norm']:.2f}/{record['mean_line_error_m']:.2f} "
             f"done={record['done_count']} finish={record['finished_count']} "
             f"kl={record['approx_kl']:.4f} ent={record['entropy']:.3f} "
             f"time={record['elapsed_s']:.1f}s{eval_msg}",

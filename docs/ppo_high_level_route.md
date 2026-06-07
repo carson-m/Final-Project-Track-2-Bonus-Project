@@ -180,15 +180,17 @@ reward =
 
 - `num_envs = 64`
 - `rollout_steps = 512`
-- `total_updates = 160`
+- `total_updates = 200`
 - `max_episode_seconds = 240`
 - `start_max_vx = 1.25`
 - `max_vx = 2.50`
 - `start_target_straight_speed = 1.10`
 - `target_straight_speed = 2.50`
 - `start_target_curve_speed = 0.70`
-- `target_curve_speed = 1.80`
-- `speed_curriculum_updates = 100`
+- `target_curve_speed = 2.20`
+- `speed_curriculum_updates = 80`
+- `use_racing_line = true`
+- `max_line_bias_norm = 0.50`
 - `gamma = 0.995`
 - `gae_lambda = 0.95`
 - `clip_eps = 0.20`
@@ -196,7 +198,7 @@ reward =
 - `minibatch_size = 1024`
 - actor/critic MLP：2 层 hidden，每层 64，Tanh。
 
-高层任务的有效 horizon 很长。助教演示一圈约 2 分 46 秒，即 166 秒；因此训练 episode 上限必须高于这个时间。`rollout_steps` 不需要一次覆盖完整一圈，因为并行环境会跨 PPO update 延续状态，但 `max_episode_seconds` 如果低于一圈时间，策略永远看不到真正的 full-lap terminal/bonus。当前推荐用 240 秒 episode 上限，并用 180 秒或 300 秒评估视频检查完整跑圈。速度目标采用课程学习：先从约 1.1m/s 起步，100 个 update 内平滑提升到直道 2.5m/s、弯道 1.8m/s，然后保留后续 update 做高速微调。
+高层任务的有效 horizon 很长。助教演示一圈约 2 分 46 秒，即 166 秒；因此训练 episode 上限必须高于这个时间。`rollout_steps` 不需要一次覆盖完整一圈，因为并行环境会跨 PPO update 延续状态，但 `max_episode_seconds` 如果低于一圈时间，策略永远看不到真正的 full-lap terminal/bonus。当前推荐用 240 秒 episode 上限，并用 180 秒或 300 秒评估视频检查完整跑圈。速度目标采用课程学习：先从约 1.1m/s 起步，80 个 update 内平滑提升到直道 2.5m/s、弯道 2.2m/s，然后保留后续 update 做高速微调。高速实验默认启用 racing-line latent action：actor 内部多输出一维弯道横向 bias，部署时仍只返回 `[vx, vy, yaw_rate]`。
 
 ## 可行性分析
 
@@ -326,7 +328,7 @@ _CHECKPOINT_METADATA
 !python train_highlevel_ppo_torch.py \
   --checkpoint-dir best_checkpoint \
   --output-dir artifacts/highlevel_ppo_torch \
-  --total-updates 160 \
+  --total-updates 200 \
   --num-envs 64 \
   --rollout-steps 512 \
   --max-episode-seconds 240 \
@@ -335,8 +337,10 @@ _CHECKPOINT_METADATA
   --start-target-straight-speed 1.10 \
   --target-straight-speed 2.50 \
   --start-target-curve-speed 0.70 \
-  --target-curve-speed 1.80 \
-  --speed-curriculum-updates 100 \
+  --target-curve-speed 2.20 \
+  --speed-curriculum-updates 80 \
+  --use-racing-line \
+  --max-line-bias-norm 0.50 \
   --ppo-epochs 4 \
   --minibatch-size 1024 \
   --start-randomization curriculum \
