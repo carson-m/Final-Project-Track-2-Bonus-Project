@@ -413,7 +413,7 @@ class JaxTrackBatchEnv:
             self.jnp.asarray(lateral, dtype=self.jnp.float32),
             self.jnp.asarray(heading, dtype=self.jnp.float32),
         )
-        self.obs = np.asarray(self.track_obs_batch(self.state.data.qpos), dtype=np.float32)
+        self.obs = np.array(self.track_obs_batch(self.state.data.qpos), dtype=np.float32, copy=True)
         self.prev_s = (self.obs[:, 0] * TRACK_LENGTH_M).astype(np.float32)
         self.prev_speed.fill(0.0)
         self.cum_progress.fill(0.0)
@@ -445,7 +445,8 @@ class JaxTrackBatchEnv:
             return self.jnp.where(mask, reset_leaf, next_leaf)
 
         self.state = self.jax.tree_util.tree_map(choose, self.state, reset_state)
-        reset_obs = np.asarray(self.track_obs_batch(reset_state.data.qpos), dtype=np.float32)
+        reset_obs = np.array(self.track_obs_batch(reset_state.data.qpos), dtype=np.float32, copy=True)
+        self.obs = np.array(self.obs, dtype=np.float32, copy=True)
         self.obs[done] = reset_obs[done]
         self.prev_s[done] = self.obs[done, 0] * TRACK_LENGTH_M
         self.prev_speed[done] = 0.0
@@ -477,7 +478,7 @@ class JaxTrackBatchEnv:
         step_keys = self.jax.random.split(step_key, self.num_envs)
         self.state = self.step_batch_fn(self.state, self.jnp.asarray(command, dtype=self.jnp.float32), step_keys)
 
-        next_obs = np.asarray(self.track_obs_batch(self.state.data.qpos), dtype=np.float32)
+        next_obs = np.array(self.track_obs_batch(self.state.data.qpos), dtype=np.float32, copy=True)
         s_next = next_obs[:, 0] * TRACK_LENGTH_M
         delta_s = s_next - self.prev_s
         delta_s = np.where(delta_s < -TRACK_LENGTH_M / 2.0, delta_s + TRACK_LENGTH_M, delta_s)
