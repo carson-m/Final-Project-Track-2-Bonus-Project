@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--total-updates", type=int, default=80)
     parser.add_argument("--num-envs", type=int, default=64)
-    parser.add_argument("--rollout-steps", type=int, default=256)
+    parser.add_argument("--rollout-steps", type=int, default=512)
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=1024)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -72,14 +72,21 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--num-hidden-layers", type=int, default=2)
-    parser.add_argument("--max-vx", type=float, default=1.0)
-    parser.add_argument("--max-vy", type=float, default=0.22)
-    parser.add_argument("--max-yaw-rate", type=float, default=0.60)
-    parser.add_argument("--command-filter-alpha", type=float, default=0.25)
-    parser.add_argument("--max-command-delta", type=float, default=0.10)
+    parser.add_argument("--max-vx", type=float, default=1.25)
+    parser.add_argument("--max-vy", type=float, default=0.24)
+    parser.add_argument("--max-yaw-rate", type=float, default=0.65)
+    parser.add_argument("--command-filter-alpha", type=float, default=0.30)
+    parser.add_argument("--max-command-delta", type=float, default=0.12)
     parser.add_argument("--edge-slowdown-margin-norm", type=float, default=0.35)
     parser.add_argument("--stand-seconds", type=float, default=1.0)
-    parser.add_argument("--max-episode-seconds", type=float, default=90.0)
+    parser.add_argument("--max-episode-seconds", type=float, default=240.0)
+    parser.add_argument("--target-straight-speed", type=float, default=1.10)
+    parser.add_argument("--target-curve-speed", type=float, default=0.70)
+    parser.add_argument("--progress-reward-scale", type=float, default=12.0)
+    parser.add_argument("--speed-reward-scale", type=float, default=0.08)
+    parser.add_argument("--target-speed-reward-scale", type=float, default=0.10)
+    parser.add_argument("--slow-penalty-scale", type=float, default=0.08)
+    parser.add_argument("--backward-penalty-scale", type=float, default=0.40)
 
     parser.add_argument("--start-randomization", choices=["fixed", "full_track", "curriculum"], default="curriculum")
     parser.add_argument("--start-s-m", type=float, default=0.0)
@@ -120,6 +127,8 @@ class ActorCritic(nn.Module):
                 nn.init.orthogonal_(module.weight, gain=math.sqrt(2.0))
                 nn.init.zeros_(module.bias)
         nn.init.orthogonal_(self.actor_mean.weight, gain=0.01)
+        with torch.no_grad():
+            self.actor_mean.bias[0].fill_(0.5)
 
     def actor_forward(self, obs: torch.Tensor) -> torch.Tensor:
         return self.actor_mean(self.actor_body(obs))
@@ -500,6 +509,16 @@ class JaxTrackBatchEnv:
         lateral_m = np.abs(next_obs[:, 1]) * HALF_WIDTH_M
         heading_abs = np.abs(next_obs[:, 3])
         margin_m = next_obs[:, 2] * HALF_WIDTH_M
+        turn_intensity = np.clip(np.abs(next_obs[:, 4]), 0.0, 1.0)
+        target_speed = (
+            (1.0 - turn_intensity) * float(self.args.target_straight_speed)
+            + turn_intensity * float(self.args.target_curve_speed)
+        )
+        target_speed = np.minimum(target_speed, float(self.args.max_vx))
+        target_speed = np.maximum(target_speed, 1e-3)
+        speed_fraction = np.clip(progress_speed / target_speed, 0.0, 1.0)
+        slow_gap = np.clip((target_speed - progress_speed) / target_speed, 0.0, 2.0)
+        backward_speed = np.clip(-progress_speed, 0.0, 2.0)
         new_cum_progress = self.cum_progress + np.clip(delta_s, -0.20, 0.20)
         fallen = np.asarray(self.state.done, dtype=bool) | (qpos[:, 2] < 0.23)
         boundary = margin_m < 0.0
@@ -507,8 +526,11 @@ class JaxTrackBatchEnv:
         timeout = (self.episode_step + 1) >= self.max_episode_steps
         done = fallen | boundary | finished | timeout
 
-        reward = 6.0 * delta_s
-        reward += 0.03 * np.clip(progress_speed, -1.0, 2.0)
+        reward = float(self.args.progress_reward_scale) * delta_s
+        reward += float(self.args.speed_reward_scale) * np.clip(progress_speed, -0.5, float(self.args.max_vx))
+        reward += float(self.args.target_speed_reward_scale) * speed_fraction
+        reward -= float(self.args.slow_penalty_scale) * slow_gap
+        reward -= float(self.args.backward_penalty_scale) * backward_speed
         reward += 0.02 * np.clip(next_obs[:, 2], 0.0, 1.0)
         reward -= 0.35 * np.square(lateral_m)
         reward -= 0.08 * np.square(heading_abs)
@@ -548,6 +570,7 @@ class JaxTrackBatchEnv:
             "mean_lateral_m": float(np.mean(lateral_m)),
             "mean_margin_m": float(np.mean(margin_m)),
             "mean_progress_speed": float(np.mean(progress_speed)),
+            "mean_target_speed": float(np.mean(target_speed)),
             "fall_count": float(np.sum(fallen)),
             "boundary_count": float(np.sum(boundary)),
             "mean_energy": float(np.mean(energy)),
@@ -771,6 +794,7 @@ def main() -> None:
             "mean_lateral_m": float(np.mean([item["mean_lateral_m"] for item in rollout_infos])),
             "mean_margin_m": float(np.mean([item["mean_margin_m"] for item in rollout_infos])),
             "mean_progress_speed": float(np.mean([item["mean_progress_speed"] for item in rollout_infos])),
+            "mean_target_speed": float(np.mean([item["mean_target_speed"] for item in rollout_infos])),
             "fall_count": sum(item["fall_count"] for item in rollout_infos),
             "boundary_count": sum(item["boundary_count"] for item in rollout_infos),
             "mean_energy": float(np.mean([item["mean_energy"] for item in rollout_infos])),
@@ -798,6 +822,7 @@ def main() -> None:
             "mean_lateral_m": info_sum["mean_lateral_m"],
             "mean_margin_m": info_sum["mean_margin_m"],
             "mean_progress_speed": info_sum["mean_progress_speed"],
+            "mean_target_speed": info_sum["mean_target_speed"],
             "fall_count": int(info_sum["fall_count"]),
             "boundary_count": int(info_sum["boundary_count"]),
             "mean_energy": info_sum["mean_energy"],
@@ -820,7 +845,8 @@ def main() -> None:
 
         print(
             f"[update {update_idx:04d}] reward={record['mean_reward']:.3f} "
-            f"speed={record['mean_progress_speed']:.2f}m/s lateral={record['mean_lateral_m']:.2f}m "
+            f"speed={record['mean_progress_speed']:.2f}/{record['mean_target_speed']:.2f}m/s "
+            f"lateral={record['mean_lateral_m']:.2f}m "
             f"done={record['done_count']} finish={record['finished_count']} "
             f"kl={record['approx_kl']:.4f} ent={record['entropy']:.3f} "
             f"time={record['elapsed_s']:.1f}s{eval_msg}",

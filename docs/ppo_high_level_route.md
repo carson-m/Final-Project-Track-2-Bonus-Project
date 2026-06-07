@@ -137,8 +137,11 @@ yaw_rate = max_yaw_rate * tanh(raw[2])
 
 ```text
 reward =
-  6.0 * delta_s
-  + 0.03 * clipped_progress_speed
+  progress_reward_scale * delta_s
+  + speed_reward_scale * clipped_progress_speed
+  + target_speed_reward_scale * clipped(progress_speed / target_speed)
+  - slow_penalty_scale * below_target_speed_gap
+  - backward_penalty_scale * backward_speed
   + 0.02 * clipped_boundary_margin_norm
   - 0.35 * lateral_error_m^2
   - 0.08 * heading_error_rad^2
@@ -176,7 +179,12 @@ reward =
 默认配置：
 
 - `num_envs = 64`
-- `rollout_steps = 256`
+- `rollout_steps = 512`
+- `total_updates = 120`
+- `max_episode_seconds = 240`
+- `max_vx = 1.25`
+- `target_straight_speed = 1.10`
+- `target_curve_speed = 0.70`
 - `gamma = 0.995`
 - `gae_lambda = 0.95`
 - `clip_eps = 0.20`
@@ -184,7 +192,7 @@ reward =
 - `minibatch_size = 1024`
 - actor/critic MLP：2 层 hidden，每层 64，Tanh。
 
-高层任务的有效 horizon 很长，一圈 200m，如果速度 1m/s 也需要约 200 秒。因此训练时不应只看短片段 reward，必须定期用 `run_track_bonus.py` 跑长评估。
+高层任务的有效 horizon 很长。助教演示一圈约 2 分 46 秒，即 166 秒；因此训练 episode 上限必须高于这个时间。`rollout_steps` 不需要一次覆盖完整一圈，因为并行环境会跨 PPO update 延续状态，但 `max_episode_seconds` 如果低于一圈时间，策略永远看不到真正的 full-lap terminal/bonus。当前推荐用 240 秒 episode 上限，并用 180 秒或 300 秒评估视频检查完整跑圈。
 
 ## 可行性分析
 
@@ -314,14 +322,18 @@ _CHECKPOINT_METADATA
 !python train_highlevel_ppo_torch.py \
   --checkpoint-dir best_checkpoint \
   --output-dir artifacts/highlevel_ppo_torch \
-  --total-updates 80 \
+  --total-updates 120 \
   --num-envs 64 \
-  --rollout-steps 256 \
+  --rollout-steps 512 \
+  --max-episode-seconds 240 \
+  --max-vx 1.25 \
+  --target-straight-speed 1.10 \
+  --target-curve-speed 0.70 \
   --ppo-epochs 4 \
   --minibatch-size 1024 \
   --start-randomization curriculum \
-  --eval-interval 10 \
-  --eval-seconds 120
+  --eval-interval 0 \
+  --eval-seconds 180
 ```
 
 如果显存不足：

@@ -108,12 +108,12 @@ class PPOPlannerConfig:
     stand_seconds: float = 1.0
     hidden_dim: int = 64
     num_hidden_layers: int = 2
-    command_filter_alpha: float = 0.25
-    max_straight_speed_mps: float = 1.0
-    max_lateral_speed_mps: float = 0.22
-    max_yaw_rate_radps: float = 0.60
+    command_filter_alpha: float = 0.30
+    max_straight_speed_mps: float = 1.25
+    max_lateral_speed_mps: float = 0.24
+    max_yaw_rate_radps: float = 0.65
     edge_slowdown_margin_norm: float = 0.35
-    max_command_delta: float = 0.10
+    max_command_delta: float = 0.12
     use_stability_envelope: bool = True
     track_length_m: float = 200.0
     turn_radius_m: float = 18.25
