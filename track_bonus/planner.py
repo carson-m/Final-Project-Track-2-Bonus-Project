@@ -101,6 +101,54 @@ class LearnedPlannerConfig:
         }
 
 
+@dataclass(frozen=True)
+class PPOPlannerConfig:
+    planner_type: str = "ppo_mlp"
+    weights_path: str = "planner_weights.npz"
+    stand_seconds: float = 1.0
+    hidden_dim: int = 64
+    num_hidden_layers: int = 2
+    command_filter_alpha: float = 0.25
+    max_straight_speed_mps: float = 1.0
+    max_lateral_speed_mps: float = 0.22
+    max_yaw_rate_radps: float = 0.60
+    edge_slowdown_margin_norm: float = 0.35
+    max_command_delta: float = 0.10
+    use_stability_envelope: bool = True
+    track_length_m: float = 200.0
+    turn_radius_m: float = 18.25
+    half_width_m: float = 2.0
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "PPOPlannerConfig":
+        valid = set(cls.__dataclass_fields__.keys())
+        values = {key: payload[key] for key in payload if key in valid}
+        return cls(**values)
+
+    @classmethod
+    def load(cls, path: Path) -> "PPOPlannerConfig":
+        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "planner_type": self.planner_type,
+            "weights_path": self.weights_path,
+            "stand_seconds": self.stand_seconds,
+            "hidden_dim": self.hidden_dim,
+            "num_hidden_layers": self.num_hidden_layers,
+            "command_filter_alpha": self.command_filter_alpha,
+            "max_straight_speed_mps": self.max_straight_speed_mps,
+            "max_lateral_speed_mps": self.max_lateral_speed_mps,
+            "max_yaw_rate_radps": self.max_yaw_rate_radps,
+            "edge_slowdown_margin_norm": self.edge_slowdown_margin_norm,
+            "max_command_delta": self.max_command_delta,
+            "use_stability_envelope": self.use_stability_envelope,
+            "track_length_m": self.track_length_m,
+            "turn_radius_m": self.turn_radius_m,
+            "half_width_m": self.half_width_m,
+        }
+
+
 class StarterTrackPlanner:
     """Conservative coordinate-to-command baseline.
 
@@ -111,10 +159,10 @@ class StarterTrackPlanner:
 
     def __init__(
         self,
-        config: StarterPlannerConfig | LearnedPlannerConfig,
+        config: StarterPlannerConfig | LearnedPlannerConfig | PPOPlannerConfig,
         weights: dict[str, np.ndarray] | None = None,
     ) -> None:
-        if config.planner_type not in {"starter_pd", "learned_mlp"}:
+        if config.planner_type not in {"starter_pd", "learned_mlp", "ppo_mlp"}:
             raise ValueError(f"Unsupported planner_type: {config.planner_type!r}")
         self.config = config
         self.track: StandardOvalTrack = official_track()
@@ -135,11 +183,21 @@ class StarterTrackPlanner:
                 with np.load(weights_path) as data:
                     weights = {key: np.asarray(data[key]) for key in data.files}
             return cls(config, weights)
+        if planner_type == "ppo_mlp":
+            config = PPOPlannerConfig.from_dict(payload)
+            weights_path = path.parent / config.weights_path
+            weights = None
+            if weights_path.exists():
+                with np.load(weights_path) as data:
+                    weights = {key: np.asarray(data[key]) for key in data.files}
+            return cls(config, weights)
         return cls(StarterPlannerConfig.from_dict(payload))
 
     def command(self, obs: TrackControllerObservation, t: float) -> np.ndarray:
         if isinstance(self.config, LearnedPlannerConfig):
             return self._learned_command(obs, t)
+        if isinstance(self.config, PPOPlannerConfig):
+            return self._ppo_command(obs, t)
 
         if t < self.config.stand_seconds:
             return np.zeros(3, dtype=np.float32)
@@ -246,6 +304,53 @@ class StarterTrackPlanner:
         self.last_cmd = cmd_filtered.astype(np.float32)
         return self.last_cmd
 
+    def _ppo_command(self, obs: TrackControllerObservation, t: float) -> np.ndarray:
+        if not isinstance(self.config, PPOPlannerConfig):
+            raise TypeError("_ppo_command is only available for ppo_mlp planners.")
+
+        if t < self.config.stand_seconds:
+            self.last_cmd = np.zeros(3, dtype=np.float32)
+            return np.zeros(3, dtype=np.float32)
+
+        if self.weights is None:
+            self.last_cmd = np.array([0.25, 0.0, 0.0], dtype=np.float32)
+            return self.last_cmd
+
+        x = obs.as_array().astype(np.float32)
+        h = x
+        for layer_idx in range(1, int(self.config.num_hidden_layers) + 1):
+            w_key = f"w{layer_idx}"
+            b_key = f"b{layer_idx}"
+            if w_key not in self.weights or b_key not in self.weights:
+                raise KeyError(f"Missing PPO planner layer weights: {w_key}/{b_key}")
+            h = np.tanh(np.dot(h, self.weights[w_key]) + self.weights[b_key])
+
+        if "w_out" not in self.weights or "b_out" not in self.weights:
+            raise KeyError("Missing PPO planner output weights: w_out/b_out")
+        out = np.dot(h, self.weights["w_out"]) + self.weights["b_out"]
+
+        cmd_raw = np.array(
+            [
+                0.5 * float(self.config.max_straight_speed_mps) * (np.tanh(out[0]) + 1.0),
+                float(self.config.max_lateral_speed_mps) * np.tanh(out[1]),
+                float(self.config.max_yaw_rate_radps) * np.tanh(out[2]),
+            ],
+            dtype=np.float32,
+        )
+
+        s = float(obs.lap_fraction) * float(self.track.length_m)
+        if bool(self.config.use_stability_envelope):
+            cmd_raw = self._apply_ppo_stability_envelope(obs, s, cmd_raw)
+
+        alpha = float(np.clip(self.config.command_filter_alpha, 0.05, 1.0))
+        cmd_filtered = alpha * cmd_raw + (1.0 - alpha) * self.last_cmd
+        max_delta = float(max(self.config.max_command_delta, 0.0))
+        if max_delta > 0.0:
+            delta = np.clip(cmd_filtered - self.last_cmd, -max_delta, max_delta)
+            cmd_filtered = self.last_cmd + delta
+        self.last_cmd = cmd_filtered.astype(np.float32)
+        return self.last_cmd
+
     def _apply_learned_stability_envelope(
         self,
         obs: TrackControllerObservation,
@@ -279,6 +384,49 @@ class StarterTrackPlanner:
 
         risk_scale = 1.0 - 0.30 * heading_risk - 0.25 * lateral_risk - 0.35 * edge_risk
         speed_cap *= float(np.clip(risk_scale, 0.35, 1.0))
+
+        vx = np.clip(float(cmd[0]), 0.0, speed_cap)
+        vy = np.clip(
+            float(cmd[1]),
+            -float(self.config.max_lateral_speed_mps),
+            float(self.config.max_lateral_speed_mps),
+        )
+        yaw_rate = np.clip(
+            float(cmd[2]),
+            -float(self.config.max_yaw_rate_radps),
+            float(self.config.max_yaw_rate_radps),
+        )
+        return np.array([vx, vy, yaw_rate], dtype=np.float32)
+
+    def _apply_ppo_stability_envelope(
+        self,
+        obs: TrackControllerObservation,
+        s: float,
+        cmd: np.ndarray,
+    ) -> np.ndarray:
+        if not isinstance(self.config, PPOPlannerConfig):
+            raise TypeError("_apply_ppo_stability_envelope requires a ppo_mlp planner.")
+
+        def get_curv_norm(s_val: float) -> float:
+            _, _, curvature = self.track.centerline_pose(s_val)
+            return abs(float(curvature)) * float(self.track.turn_radius_m)
+
+        turn_intensity = max(
+            abs(float(obs.curvature_norm)),
+            get_curv_norm(s + 2.0),
+            get_curv_norm(s + 5.0),
+        )
+        turn_intensity = float(np.clip(turn_intensity, 0.0, 1.0))
+
+        speed_cap = float(self.config.max_straight_speed_mps)
+        heading_risk = min(abs(float(obs.heading_error_rad)) / 1.0, 1.0)
+        lateral_risk = np.clip((abs(float(obs.lateral_error_norm)) - 0.35) / 0.65, 0.0, 1.0)
+        edge_limit = max(float(self.config.edge_slowdown_margin_norm), 1e-6)
+        edge_risk = np.clip((edge_limit - float(obs.boundary_margin_norm)) / edge_limit, 0.0, 1.0)
+        turn_risk = 0.30 * turn_intensity
+
+        risk_scale = 1.0 - 0.25 * heading_risk - 0.25 * lateral_risk - 0.35 * edge_risk - turn_risk
+        speed_cap *= float(np.clip(risk_scale, 0.30, 1.0))
 
         vx = np.clip(float(cmd[0]), 0.0, speed_cap)
         vy = np.clip(
