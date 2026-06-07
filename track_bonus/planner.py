@@ -109,12 +109,17 @@ class PPOPlannerConfig:
     hidden_dim: int = 64
     num_hidden_layers: int = 2
     command_filter_alpha: float = 0.30
-    max_straight_speed_mps: float = 1.25
+    max_straight_speed_mps: float = 2.50
     max_lateral_speed_mps: float = 0.24
     max_yaw_rate_radps: float = 0.65
     edge_slowdown_margin_norm: float = 0.35
     max_command_delta: float = 0.12
     use_stability_envelope: bool = True
+    heading_speed_penalty: float = 0.20
+    lateral_speed_penalty: float = 0.25
+    edge_speed_penalty: float = 0.35
+    turn_speed_penalty: float = 0.20
+    min_speed_cap_scale: float = 0.30
     track_length_m: float = 200.0
     turn_radius_m: float = 18.25
     half_width_m: float = 2.0
@@ -143,6 +148,11 @@ class PPOPlannerConfig:
             "edge_slowdown_margin_norm": self.edge_slowdown_margin_norm,
             "max_command_delta": self.max_command_delta,
             "use_stability_envelope": self.use_stability_envelope,
+            "heading_speed_penalty": self.heading_speed_penalty,
+            "lateral_speed_penalty": self.lateral_speed_penalty,
+            "edge_speed_penalty": self.edge_speed_penalty,
+            "turn_speed_penalty": self.turn_speed_penalty,
+            "min_speed_cap_scale": self.min_speed_cap_scale,
             "track_length_m": self.track_length_m,
             "turn_radius_m": self.turn_radius_m,
             "half_width_m": self.half_width_m,
@@ -423,10 +433,16 @@ class StarterTrackPlanner:
         lateral_risk = np.clip((abs(float(obs.lateral_error_norm)) - 0.35) / 0.65, 0.0, 1.0)
         edge_limit = max(float(self.config.edge_slowdown_margin_norm), 1e-6)
         edge_risk = np.clip((edge_limit - float(obs.boundary_margin_norm)) / edge_limit, 0.0, 1.0)
-        turn_risk = 0.30 * turn_intensity
+        turn_risk = float(self.config.turn_speed_penalty) * turn_intensity
 
-        risk_scale = 1.0 - 0.25 * heading_risk - 0.25 * lateral_risk - 0.35 * edge_risk - turn_risk
-        speed_cap *= float(np.clip(risk_scale, 0.30, 1.0))
+        risk_scale = (
+            1.0
+            - float(self.config.heading_speed_penalty) * heading_risk
+            - float(self.config.lateral_speed_penalty) * lateral_risk
+            - float(self.config.edge_speed_penalty) * edge_risk
+            - turn_risk
+        )
+        speed_cap *= float(np.clip(risk_scale, float(self.config.min_speed_cap_scale), 1.0))
 
         vx = np.clip(float(cmd[0]), 0.0, speed_cap)
         vy = np.clip(

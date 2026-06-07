@@ -72,7 +72,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--num-hidden-layers", type=int, default=2)
-    parser.add_argument("--max-vx", type=float, default=1.25)
+    parser.add_argument("--start-max-vx", type=float, default=1.25)
+    parser.add_argument("--max-vx", type=float, default=2.50)
     parser.add_argument("--max-vy", type=float, default=0.24)
     parser.add_argument("--max-yaw-rate", type=float, default=0.65)
     parser.add_argument("--command-filter-alpha", type=float, default=0.30)
@@ -80,13 +81,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--edge-slowdown-margin-norm", type=float, default=0.35)
     parser.add_argument("--stand-seconds", type=float, default=1.0)
     parser.add_argument("--max-episode-seconds", type=float, default=240.0)
-    parser.add_argument("--target-straight-speed", type=float, default=1.10)
-    parser.add_argument("--target-curve-speed", type=float, default=0.70)
+    parser.add_argument("--start-target-straight-speed", type=float, default=1.10)
+    parser.add_argument("--target-straight-speed", type=float, default=2.50)
+    parser.add_argument("--start-target-curve-speed", type=float, default=0.70)
+    parser.add_argument("--target-curve-speed", type=float, default=1.80)
+    parser.add_argument("--speed-curriculum-updates", type=int, default=100)
+    parser.add_argument("--speed-curriculum-warmup-updates", type=int, default=5)
     parser.add_argument("--progress-reward-scale", type=float, default=12.0)
     parser.add_argument("--speed-reward-scale", type=float, default=0.08)
     parser.add_argument("--target-speed-reward-scale", type=float, default=0.10)
     parser.add_argument("--slow-penalty-scale", type=float, default=0.08)
     parser.add_argument("--backward-penalty-scale", type=float, default=0.40)
+    parser.add_argument("--heading-speed-penalty", type=float, default=0.20)
+    parser.add_argument("--lateral-speed-penalty", type=float, default=0.25)
+    parser.add_argument("--edge-speed-penalty", type=float, default=0.35)
+    parser.add_argument("--turn-speed-penalty", type=float, default=0.20)
+    parser.add_argument("--min-speed-cap-scale", type=float, default=0.30)
 
     parser.add_argument("--start-randomization", choices=["fixed", "full_track", "curriculum"], default="curriculum")
     parser.add_argument("--start-s-m", type=float, default=0.0)
@@ -169,15 +179,56 @@ def raw_action_to_command(raw_action: np.ndarray, *, max_vx: float, max_vy: floa
     ).astype(np.float32)
 
 
-def apply_stability_envelope(command: np.ndarray, obs: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+def smoothstep(value: float) -> float:
+    value = float(np.clip(value, 0.0, 1.0))
+    return value * value * (3.0 - 2.0 * value)
+
+
+def speed_schedule(args: argparse.Namespace, update_idx: int | None) -> dict[str, float]:
+    if update_idx is None:
+        frac = 1.0
+    else:
+        warmup = int(max(args.speed_curriculum_warmup_updates, 0))
+        duration = int(max(args.speed_curriculum_updates, 1))
+        frac = smoothstep((int(update_idx) - warmup) / duration)
+
+    def blend(start: float, final: float) -> float:
+        return float(start + frac * (final - start))
+
+    max_vx = blend(float(args.start_max_vx), float(args.max_vx))
+    target_straight = blend(float(args.start_target_straight_speed), float(args.target_straight_speed))
+    target_curve = blend(float(args.start_target_curve_speed), float(args.target_curve_speed))
+    target_straight = min(target_straight, max_vx)
+    target_curve = min(target_curve, max_vx)
+    return {
+        "fraction": float(frac),
+        "max_vx": float(max_vx),
+        "target_straight_speed": float(target_straight),
+        "target_curve_speed": float(target_curve),
+    }
+
+
+def apply_stability_envelope(
+    command: np.ndarray,
+    obs: np.ndarray,
+    args: argparse.Namespace,
+    *,
+    max_vx: float,
+) -> np.ndarray:
     command = np.asarray(command, dtype=np.float32).copy()
     turn_intensity = np.clip(np.abs(obs[:, 4]), 0.0, 1.0)
     heading_risk = np.minimum(np.abs(obs[:, 3]) / 1.0, 1.0)
     lateral_risk = np.clip((np.abs(obs[:, 1]) - 0.35) / 0.65, 0.0, 1.0)
     edge_limit = max(float(args.edge_slowdown_margin_norm), 1e-6)
     edge_risk = np.clip((edge_limit - obs[:, 2]) / edge_limit, 0.0, 1.0)
-    risk_scale = 1.0 - 0.25 * heading_risk - 0.25 * lateral_risk - 0.35 * edge_risk - 0.30 * turn_intensity
-    speed_cap = float(args.max_vx) * np.clip(risk_scale, 0.30, 1.0)
+    risk_scale = (
+        1.0
+        - float(args.heading_speed_penalty) * heading_risk
+        - float(args.lateral_speed_penalty) * lateral_risk
+        - float(args.edge_speed_penalty) * edge_risk
+        - float(args.turn_speed_penalty) * turn_intensity
+    )
+    speed_cap = float(max_vx) * np.clip(risk_scale, float(args.min_speed_cap_scale), 1.0)
     command[:, 0] = np.clip(command[:, 0], 0.0, speed_cap)
     command[:, 1] = np.clip(command[:, 1], -float(args.max_vy), float(args.max_vy))
     command[:, 2] = np.clip(command[:, 2], -float(args.max_yaw_rate), float(args.max_yaw_rate))
@@ -469,13 +520,14 @@ class JaxTrackBatchEnv:
         if self.state is None or self.obs is None:
             raise RuntimeError("Call reset() before step().")
 
+        speed_cfg = speed_schedule(self.args, update_idx)
         command = raw_action_to_command(
             raw_action,
-            max_vx=float(self.args.max_vx),
+            max_vx=float(speed_cfg["max_vx"]),
             max_vy=float(self.args.max_vy),
             max_yaw_rate=float(self.args.max_yaw_rate),
         )
-        command = apply_stability_envelope(command, self.obs, self.args)
+        command = apply_stability_envelope(command, self.obs, self.args, max_vx=float(speed_cfg["max_vx"]))
         warmup = self.episode_step < self.stand_steps
         command[warmup] = 0.0
 
@@ -511,10 +563,10 @@ class JaxTrackBatchEnv:
         margin_m = next_obs[:, 2] * HALF_WIDTH_M
         turn_intensity = np.clip(np.abs(next_obs[:, 4]), 0.0, 1.0)
         target_speed = (
-            (1.0 - turn_intensity) * float(self.args.target_straight_speed)
-            + turn_intensity * float(self.args.target_curve_speed)
+            (1.0 - turn_intensity) * float(speed_cfg["target_straight_speed"])
+            + turn_intensity * float(speed_cfg["target_curve_speed"])
         )
-        target_speed = np.minimum(target_speed, float(self.args.max_vx))
+        target_speed = np.minimum(target_speed, float(speed_cfg["max_vx"]))
         target_speed = np.maximum(target_speed, 1e-3)
         speed_fraction = np.clip(progress_speed / target_speed, 0.0, 1.0)
         slow_gap = np.clip((target_speed - progress_speed) / target_speed, 0.0, 2.0)
@@ -527,7 +579,7 @@ class JaxTrackBatchEnv:
         done = fallen | boundary | finished | timeout
 
         reward = float(self.args.progress_reward_scale) * delta_s
-        reward += float(self.args.speed_reward_scale) * np.clip(progress_speed, -0.5, float(self.args.max_vx))
+        reward += float(self.args.speed_reward_scale) * np.clip(progress_speed, -0.5, float(speed_cfg["max_vx"]))
         reward += float(self.args.target_speed_reward_scale) * speed_fraction
         reward -= float(self.args.slow_penalty_scale) * slow_gap
         reward -= float(self.args.backward_penalty_scale) * backward_speed
@@ -571,6 +623,10 @@ class JaxTrackBatchEnv:
             "mean_margin_m": float(np.mean(margin_m)),
             "mean_progress_speed": float(np.mean(progress_speed)),
             "mean_target_speed": float(np.mean(target_speed)),
+            "curriculum_fraction": float(speed_cfg["fraction"]),
+            "current_max_vx": float(speed_cfg["max_vx"]),
+            "current_target_straight_speed": float(speed_cfg["target_straight_speed"]),
+            "current_target_curve_speed": float(speed_cfg["target_curve_speed"]),
             "fall_count": float(np.sum(fallen)),
             "boundary_count": float(np.sum(boundary)),
             "mean_energy": float(np.mean(energy)),
@@ -605,7 +661,12 @@ def compute_gae(
     return advantages, returns
 
 
-def export_numpy_planner(model: ActorCritic, args: argparse.Namespace, output_dir: Path) -> None:
+def export_numpy_planner(
+    model: ActorCritic,
+    args: argparse.Namespace,
+    output_dir: Path,
+    update_idx: int | None = None,
+) -> None:
     actor_layers = [module for module in model.actor_body if isinstance(module, nn.Linear)]
     arrays: dict[str, np.ndarray] = {}
     for idx, layer in enumerate(actor_layers, start=1):
@@ -615,6 +676,7 @@ def export_numpy_planner(model: ActorCritic, args: argparse.Namespace, output_di
     arrays["b_out"] = model.actor_mean.bias.detach().cpu().numpy().astype(np.float32)
     np.savez(output_dir / "planner_weights.npz", **arrays)
 
+    deploy_speed = speed_schedule(args, update_idx)
     planner_config = {
         "planner_type": "ppo_mlp",
         "weights_path": "planner_weights.npz",
@@ -622,15 +684,23 @@ def export_numpy_planner(model: ActorCritic, args: argparse.Namespace, output_di
         "hidden_dim": int(args.hidden_dim),
         "num_hidden_layers": int(args.num_hidden_layers),
         "command_filter_alpha": float(args.command_filter_alpha),
-        "max_straight_speed_mps": float(args.max_vx),
+        "max_straight_speed_mps": float(deploy_speed["max_vx"]),
         "max_lateral_speed_mps": float(args.max_vy),
         "max_yaw_rate_radps": float(args.max_yaw_rate),
         "edge_slowdown_margin_norm": float(args.edge_slowdown_margin_norm),
         "max_command_delta": float(args.max_command_delta),
         "use_stability_envelope": True,
+        "heading_speed_penalty": float(args.heading_speed_penalty),
+        "lateral_speed_penalty": float(args.lateral_speed_penalty),
+        "edge_speed_penalty": float(args.edge_speed_penalty),
+        "turn_speed_penalty": float(args.turn_speed_penalty),
+        "min_speed_cap_scale": float(args.min_speed_cap_scale),
         "track_length_m": TRACK_LENGTH_M,
         "turn_radius_m": TURN_RADIUS_M,
         "half_width_m": HALF_WIDTH_M,
+        "training_curriculum_fraction": float(deploy_speed["fraction"]),
+        "training_target_straight_speed_mps": float(deploy_speed["target_straight_speed"]),
+        "training_target_curve_speed_mps": float(deploy_speed["target_curve_speed"]),
     }
     (output_dir / "planner_config.json").write_text(json.dumps(planner_config, indent=2), encoding="utf-8")
 
@@ -777,7 +847,7 @@ def main() -> None:
                 approx_kls.append(float(approx_kl))
                 clipfracs.append(float(clipfrac))
 
-        export_numpy_planner(model, args, output_dir)
+        export_numpy_planner(model, args, output_dir, update_idx=update_idx)
         torch.save(
             {
                 "model_state_dict": model.state_dict(),
@@ -795,6 +865,14 @@ def main() -> None:
             "mean_margin_m": float(np.mean([item["mean_margin_m"] for item in rollout_infos])),
             "mean_progress_speed": float(np.mean([item["mean_progress_speed"] for item in rollout_infos])),
             "mean_target_speed": float(np.mean([item["mean_target_speed"] for item in rollout_infos])),
+            "curriculum_fraction": float(np.mean([item["curriculum_fraction"] for item in rollout_infos])),
+            "current_max_vx": float(np.mean([item["current_max_vx"] for item in rollout_infos])),
+            "current_target_straight_speed": float(
+                np.mean([item["current_target_straight_speed"] for item in rollout_infos])
+            ),
+            "current_target_curve_speed": float(
+                np.mean([item["current_target_curve_speed"] for item in rollout_infos])
+            ),
             "fall_count": sum(item["fall_count"] for item in rollout_infos),
             "boundary_count": sum(item["boundary_count"] for item in rollout_infos),
             "mean_energy": float(np.mean([item["mean_energy"] for item in rollout_infos])),
@@ -823,6 +901,10 @@ def main() -> None:
             "mean_margin_m": info_sum["mean_margin_m"],
             "mean_progress_speed": info_sum["mean_progress_speed"],
             "mean_target_speed": info_sum["mean_target_speed"],
+            "curriculum_fraction": info_sum["curriculum_fraction"],
+            "current_max_vx": info_sum["current_max_vx"],
+            "current_target_straight_speed": info_sum["current_target_straight_speed"],
+            "current_target_curve_speed": info_sum["current_target_curve_speed"],
             "fall_count": int(info_sum["fall_count"]),
             "boundary_count": int(info_sum["boundary_count"]),
             "mean_energy": info_sum["mean_energy"],
@@ -846,6 +928,7 @@ def main() -> None:
         print(
             f"[update {update_idx:04d}] reward={record['mean_reward']:.3f} "
             f"speed={record['mean_progress_speed']:.2f}/{record['mean_target_speed']:.2f}m/s "
+            f"cap={record['current_max_vx']:.2f} curr={record['curriculum_fraction']:.2f} "
             f"lateral={record['mean_lateral_m']:.2f}m "
             f"done={record['done_count']} finish={record['finished_count']} "
             f"kl={record['approx_kl']:.4f} ent={record['entropy']:.3f} "
