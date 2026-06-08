@@ -72,45 +72,48 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--num-hidden-layers", type=int, default=2)
-    parser.add_argument("--start-max-vx", type=float, default=1.50)
-    parser.add_argument("--max-vx", type=float, default=3.50)
-    parser.add_argument("--max-vy", type=float, default=0.35)
-    parser.add_argument("--max-yaw-rate", type=float, default=1.00)
-    parser.add_argument("--command-filter-alpha", type=float, default=0.45)
-    parser.add_argument("--max-command-delta", type=float, default=0.25)
+    parser.add_argument("--start-max-vx", type=float, default=2.50)
+    parser.add_argument("--max-vx", type=float, default=5.00)
+    parser.add_argument("--max-vy", type=float, default=0.45)
+    parser.add_argument("--max-yaw-rate", type=float, default=1.25)
+    parser.add_argument("--command-filter-alpha", type=float, default=0.55)
+    parser.add_argument("--max-command-delta", type=float, default=0.35)
     parser.add_argument("--edge-slowdown-margin-norm", type=float, default=0.35)
     parser.add_argument("--stand-seconds", type=float, default=1.0)
     parser.add_argument("--max-episode-seconds", type=float, default=240.0)
-    parser.add_argument("--start-target-straight-speed", type=float, default=1.30)
-    parser.add_argument("--target-straight-speed", type=float, default=3.20)
-    parser.add_argument("--start-target-curve-speed", type=float, default=1.00)
-    parser.add_argument("--target-curve-speed", type=float, default=2.80)
-    parser.add_argument("--speed-curriculum-updates", type=int, default=80)
-    parser.add_argument("--speed-curriculum-warmup-updates", type=int, default=2)
-    parser.add_argument("--progress-reward-scale", type=float, default=22.0)
-    parser.add_argument("--speed-reward-scale", type=float, default=0.20)
-    parser.add_argument("--target-speed-reward-scale", type=float, default=0.30)
-    parser.add_argument("--curve-speed-reward-scale", type=float, default=0.20)
-    parser.add_argument("--slow-penalty-scale", type=float, default=0.18)
-    parser.add_argument("--backward-penalty-scale", type=float, default=0.40)
-    parser.add_argument("--heading-speed-penalty", type=float, default=0.15)
+    parser.add_argument("--start-target-straight-speed", type=float, default=2.50)
+    parser.add_argument("--target-straight-speed", type=float, default=4.50)
+    parser.add_argument("--start-target-curve-speed", type=float, default=2.00)
+    parser.add_argument("--target-curve-speed", type=float, default=3.60)
+    parser.add_argument("--speed-curriculum-updates", type=int, default=40)
+    parser.add_argument("--speed-curriculum-warmup-updates", type=int, default=0)
+    parser.add_argument("--progress-reward-scale", type=float, default=45.0)
+    parser.add_argument("--speed-reward-scale", type=float, default=0.45)
+    parser.add_argument("--target-speed-reward-scale", type=float, default=0.75)
+    parser.add_argument("--curve-speed-reward-scale", type=float, default=0.45)
+    parser.add_argument("--slow-penalty-scale", type=float, default=0.65)
+    parser.add_argument("--cruise-speed-floor", type=float, default=2.50)
+    parser.add_argument("--cruise-speed-penalty-scale", type=float, default=1.25)
+    parser.add_argument("--cruise-speed-reward-scale", type=float, default=0.35)
+    parser.add_argument("--backward-penalty-scale", type=float, default=0.70)
+    parser.add_argument("--heading-speed-penalty", type=float, default=0.08)
     parser.add_argument("--lateral-speed-penalty", type=float, default=0.0)
-    parser.add_argument("--edge-speed-penalty", type=float, default=0.35)
+    parser.add_argument("--edge-speed-penalty", type=float, default=0.25)
     parser.add_argument("--turn-speed-penalty", type=float, default=0.0)
-    parser.add_argument("--min-speed-cap-scale", type=float, default=0.60)
+    parser.add_argument("--min-speed-cap-scale", type=float, default=0.75)
     parser.add_argument("--use-racing-line", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--inside-line-only", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--max-line-bias-norm", type=float, default=0.75)
-    parser.add_argument("--line-vy-gain", type=float, default=0.28)
-    parser.add_argument("--line-yaw-gain", type=float, default=0.34)
-    parser.add_argument("--max-line-vy", type=float, default=0.24)
-    parser.add_argument("--max-line-yaw", type=float, default=0.32)
-    parser.add_argument("--line-lateral-weight", type=float, default=0.12)
+    parser.add_argument("--max-line-bias-norm", type=float, default=0.90)
+    parser.add_argument("--line-vy-gain", type=float, default=0.38)
+    parser.add_argument("--line-yaw-gain", type=float, default=0.46)
+    parser.add_argument("--max-line-vy", type=float, default=0.32)
+    parser.add_argument("--max-line-yaw", type=float, default=0.42)
+    parser.add_argument("--line-lateral-weight", type=float, default=0.08)
     parser.add_argument("--center-lateral-weight", type=float, default=0.0)
     parser.add_argument("--line-bias-penalty", type=float, default=0.0)
-    parser.add_argument("--inside-line-reward-scale", type=float, default=0.12)
-    parser.add_argument("--safe-boundary-margin-norm", type=float, default=0.18)
-    parser.add_argument("--boundary-risk-penalty-scale", type=float, default=0.50)
+    parser.add_argument("--inside-line-reward-scale", type=float, default=0.28)
+    parser.add_argument("--safe-boundary-margin-norm", type=float, default=0.12)
+    parser.add_argument("--boundary-risk-penalty-scale", type=float, default=0.35)
 
     parser.add_argument("--start-randomization", choices=["fixed", "full_track", "curriculum"], default="curriculum")
     parser.add_argument("--start-s-m", type=float, default=0.0)
@@ -153,9 +156,9 @@ class ActorCritic(nn.Module):
                 nn.init.zeros_(module.bias)
         nn.init.orthogonal_(self.actor_mean.weight, gain=0.01)
         with torch.no_grad():
-            self.actor_mean.bias[0].fill_(0.5)
+            self.actor_mean.bias[0].fill_(1.1)
             if self.action_dim > 3:
-                self.actor_mean.bias[3:].zero_()
+                self.actor_mean.bias[3:].fill_(0.8)
 
     def actor_forward(self, obs: torch.Tensor) -> torch.Tensor:
         return self.actor_mean(self.actor_body(obs))
@@ -629,6 +632,9 @@ class JaxTrackBatchEnv:
         target_speed = np.maximum(target_speed, 1e-3)
         speed_fraction = np.clip(progress_speed / target_speed, 0.0, 1.0)
         slow_gap = np.clip((target_speed - progress_speed) / target_speed, 0.0, 2.0)
+        cruise_floor = min(float(self.args.cruise_speed_floor), float(speed_cfg["max_vx"]))
+        cruise_gap = np.clip((cruise_floor - progress_speed) / max(cruise_floor, 1e-6), 0.0, 2.0)
+        cruise_bonus = np.clip((progress_speed - cruise_floor) / max(float(speed_cfg["max_vx"]) - cruise_floor, 1e-6), 0.0, 1.0)
         backward_speed = np.clip(-progress_speed, 0.0, 2.0)
         safe_boundary_margin = float(max(self.args.safe_boundary_margin_norm, 1e-6))
         safe_margin_gate = np.clip((next_obs[:, 2] - safe_boundary_margin) / safe_boundary_margin, 0.0, 1.0)
@@ -652,8 +658,10 @@ class JaxTrackBatchEnv:
             0.0,
             float(speed_cfg["max_vx"]),
         )
+        reward += float(self.args.cruise_speed_reward_scale) * cruise_bonus
         reward += float(self.args.inside_line_reward_scale) * turn_intensity * inside_fraction * safe_margin_gate
         reward -= float(self.args.slow_penalty_scale) * slow_gap
+        reward -= float(self.args.cruise_speed_penalty_scale) * np.square(cruise_gap)
         reward -= float(self.args.backward_penalty_scale) * backward_speed
         reward += 0.02 * np.clip(next_obs[:, 2], 0.0, 1.0)
         reward -= float(self.args.boundary_risk_penalty_scale) * np.square(boundary_risk)
@@ -701,6 +709,8 @@ class JaxTrackBatchEnv:
             "mean_margin_m": float(np.mean(margin_m)),
             "mean_progress_speed": float(np.mean(progress_speed)),
             "mean_target_speed": float(np.mean(target_speed)),
+            "mean_cruise_gap": float(np.mean(cruise_gap)),
+            "mean_cruise_bonus": float(np.mean(cruise_bonus)),
             "curriculum_fraction": float(speed_cfg["fraction"]),
             "current_max_vx": float(speed_cfg["max_vx"]),
             "current_target_straight_speed": float(speed_cfg["target_straight_speed"]),
@@ -961,6 +971,8 @@ def main() -> None:
             "mean_margin_m": float(np.mean([item["mean_margin_m"] for item in rollout_infos])),
             "mean_progress_speed": float(np.mean([item["mean_progress_speed"] for item in rollout_infos])),
             "mean_target_speed": float(np.mean([item["mean_target_speed"] for item in rollout_infos])),
+            "mean_cruise_gap": float(np.mean([item["mean_cruise_gap"] for item in rollout_infos])),
+            "mean_cruise_bonus": float(np.mean([item["mean_cruise_bonus"] for item in rollout_infos])),
             "curriculum_fraction": float(np.mean([item["curriculum_fraction"] for item in rollout_infos])),
             "current_max_vx": float(np.mean([item["current_max_vx"] for item in rollout_infos])),
             "current_target_straight_speed": float(
@@ -1000,6 +1012,8 @@ def main() -> None:
             "mean_margin_m": info_sum["mean_margin_m"],
             "mean_progress_speed": info_sum["mean_progress_speed"],
             "mean_target_speed": info_sum["mean_target_speed"],
+            "mean_cruise_gap": info_sum["mean_cruise_gap"],
+            "mean_cruise_bonus": info_sum["mean_cruise_bonus"],
             "curriculum_fraction": info_sum["curriculum_fraction"],
             "current_max_vx": info_sum["current_max_vx"],
             "current_target_straight_speed": info_sum["current_target_straight_speed"],
@@ -1027,6 +1041,7 @@ def main() -> None:
         print(
             f"[update {update_idx:04d}] reward={record['mean_reward']:.3f} "
             f"speed={record['mean_progress_speed']:.2f}/{record['mean_target_speed']:.2f}m/s "
+            f"cruise_gap={record['mean_cruise_gap']:.2f} "
             f"cap={record['current_max_vx']:.2f} curr={record['curriculum_fraction']:.2f} "
             f"lateral={record['mean_lateral_m']:.2f}m "
             f"line={record['mean_abs_line_bias_norm']:.2f}/{record['mean_line_error_m']:.2f} "
