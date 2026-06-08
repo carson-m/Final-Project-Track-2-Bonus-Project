@@ -108,24 +108,26 @@ class PPOPlannerConfig:
     stand_seconds: float = 1.0
     hidden_dim: int = 64
     num_hidden_layers: int = 2
-    command_filter_alpha: float = 0.30
-    max_straight_speed_mps: float = 2.50
-    max_lateral_speed_mps: float = 0.30
-    max_yaw_rate_radps: float = 0.80
+    command_filter_alpha: float = 0.45
+    max_straight_speed_mps: float = 3.50
+    max_lateral_speed_mps: float = 0.35
+    max_yaw_rate_radps: float = 1.00
     edge_slowdown_margin_norm: float = 0.35
-    max_command_delta: float = 0.18
+    max_command_delta: float = 0.25
     use_stability_envelope: bool = True
-    heading_speed_penalty: float = 0.20
-    lateral_speed_penalty: float = 0.25
+    heading_speed_penalty: float = 0.15
+    lateral_speed_penalty: float = 0.0
     edge_speed_penalty: float = 0.35
-    turn_speed_penalty: float = 0.10
-    min_speed_cap_scale: float = 0.45
+    turn_speed_penalty: float = 0.0
+    min_speed_cap_scale: float = 0.60
     use_racing_line: bool = True
-    max_line_bias_norm: float = 0.50
-    line_vy_gain: float = 0.22
-    line_yaw_gain: float = 0.28
-    max_line_vy: float = 0.18
-    max_line_yaw: float = 0.24
+    inside_line_only: bool = True
+    max_line_bias_norm: float = 0.75
+    line_vy_gain: float = 0.28
+    line_yaw_gain: float = 0.34
+    max_line_vy: float = 0.24
+    max_line_yaw: float = 0.32
+    safe_boundary_margin_norm: float = 0.18
     track_length_m: float = 200.0
     turn_radius_m: float = 18.25
     half_width_m: float = 2.0
@@ -160,11 +162,13 @@ class PPOPlannerConfig:
             "turn_speed_penalty": self.turn_speed_penalty,
             "min_speed_cap_scale": self.min_speed_cap_scale,
             "use_racing_line": self.use_racing_line,
+            "inside_line_only": self.inside_line_only,
             "max_line_bias_norm": self.max_line_bias_norm,
             "line_vy_gain": self.line_vy_gain,
             "line_yaw_gain": self.line_yaw_gain,
             "max_line_vy": self.max_line_vy,
             "max_line_yaw": self.max_line_yaw,
+            "safe_boundary_margin_norm": self.safe_boundary_margin_norm,
             "track_length_m": self.track_length_m,
             "turn_radius_m": self.turn_radius_m,
             "half_width_m": self.half_width_m,
@@ -354,7 +358,11 @@ class StarterTrackPlanner:
         line_bias_norm = 0.0
         if bool(self.config.use_racing_line) and np.asarray(out).shape[0] >= 4:
             turn_gate = float(np.clip(abs(float(obs.curvature_norm)), 0.0, 1.0))
-            line_bias_norm = float(self.config.max_line_bias_norm) * float(np.tanh(out[3])) * turn_gate
+            if bool(self.config.inside_line_only):
+                line_amount = 0.5 * (float(np.tanh(out[3])) + 1.0)
+            else:
+                line_amount = float(np.tanh(out[3]))
+            line_bias_norm = float(self.config.max_line_bias_norm) * line_amount * turn_gate
 
         cmd_raw = np.array(
             [
@@ -464,7 +472,7 @@ class StarterTrackPlanner:
 
         speed_cap = float(self.config.max_straight_speed_mps)
         heading_risk = min(abs(float(obs.heading_error_rad)) / 1.0, 1.0)
-        lateral_risk = np.clip((abs(float(obs.lateral_error_norm)) - 0.35) / 0.65, 0.0, 1.0)
+        lateral_risk = 0.0
         edge_limit = max(float(self.config.edge_slowdown_margin_norm), 1e-6)
         edge_risk = np.clip((edge_limit - float(obs.boundary_margin_norm)) / edge_limit, 0.0, 1.0)
         turn_risk = float(self.config.turn_speed_penalty) * turn_intensity

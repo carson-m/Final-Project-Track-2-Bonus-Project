@@ -72,19 +72,19 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--num-hidden-layers", type=int, default=2)
-    parser.add_argument("--start-max-vx", type=float, default=1.25)
-    parser.add_argument("--max-vx", type=float, default=2.50)
-    parser.add_argument("--max-vy", type=float, default=0.30)
-    parser.add_argument("--max-yaw-rate", type=float, default=0.80)
-    parser.add_argument("--command-filter-alpha", type=float, default=0.38)
-    parser.add_argument("--max-command-delta", type=float, default=0.18)
+    parser.add_argument("--start-max-vx", type=float, default=1.50)
+    parser.add_argument("--max-vx", type=float, default=3.50)
+    parser.add_argument("--max-vy", type=float, default=0.35)
+    parser.add_argument("--max-yaw-rate", type=float, default=1.00)
+    parser.add_argument("--command-filter-alpha", type=float, default=0.45)
+    parser.add_argument("--max-command-delta", type=float, default=0.25)
     parser.add_argument("--edge-slowdown-margin-norm", type=float, default=0.35)
     parser.add_argument("--stand-seconds", type=float, default=1.0)
     parser.add_argument("--max-episode-seconds", type=float, default=240.0)
-    parser.add_argument("--start-target-straight-speed", type=float, default=1.10)
-    parser.add_argument("--target-straight-speed", type=float, default=2.50)
-    parser.add_argument("--start-target-curve-speed", type=float, default=0.70)
-    parser.add_argument("--target-curve-speed", type=float, default=2.20)
+    parser.add_argument("--start-target-straight-speed", type=float, default=1.30)
+    parser.add_argument("--target-straight-speed", type=float, default=3.20)
+    parser.add_argument("--start-target-curve-speed", type=float, default=1.00)
+    parser.add_argument("--target-curve-speed", type=float, default=2.80)
     parser.add_argument("--speed-curriculum-updates", type=int, default=80)
     parser.add_argument("--speed-curriculum-warmup-updates", type=int, default=2)
     parser.add_argument("--progress-reward-scale", type=float, default=22.0)
@@ -93,20 +93,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--curve-speed-reward-scale", type=float, default=0.20)
     parser.add_argument("--slow-penalty-scale", type=float, default=0.18)
     parser.add_argument("--backward-penalty-scale", type=float, default=0.40)
-    parser.add_argument("--heading-speed-penalty", type=float, default=0.20)
-    parser.add_argument("--lateral-speed-penalty", type=float, default=0.25)
+    parser.add_argument("--heading-speed-penalty", type=float, default=0.15)
+    parser.add_argument("--lateral-speed-penalty", type=float, default=0.0)
     parser.add_argument("--edge-speed-penalty", type=float, default=0.35)
-    parser.add_argument("--turn-speed-penalty", type=float, default=0.10)
-    parser.add_argument("--min-speed-cap-scale", type=float, default=0.45)
+    parser.add_argument("--turn-speed-penalty", type=float, default=0.0)
+    parser.add_argument("--min-speed-cap-scale", type=float, default=0.60)
     parser.add_argument("--use-racing-line", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--max-line-bias-norm", type=float, default=0.50)
-    parser.add_argument("--line-vy-gain", type=float, default=0.22)
-    parser.add_argument("--line-yaw-gain", type=float, default=0.28)
-    parser.add_argument("--max-line-vy", type=float, default=0.18)
-    parser.add_argument("--max-line-yaw", type=float, default=0.24)
-    parser.add_argument("--line-lateral-weight", type=float, default=0.18)
-    parser.add_argument("--center-lateral-weight", type=float, default=0.01)
-    parser.add_argument("--line-bias-penalty", type=float, default=0.015)
+    parser.add_argument("--inside-line-only", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--max-line-bias-norm", type=float, default=0.75)
+    parser.add_argument("--line-vy-gain", type=float, default=0.28)
+    parser.add_argument("--line-yaw-gain", type=float, default=0.34)
+    parser.add_argument("--max-line-vy", type=float, default=0.24)
+    parser.add_argument("--max-line-yaw", type=float, default=0.32)
+    parser.add_argument("--line-lateral-weight", type=float, default=0.12)
+    parser.add_argument("--center-lateral-weight", type=float, default=0.0)
+    parser.add_argument("--line-bias-penalty", type=float, default=0.0)
+    parser.add_argument("--inside-line-reward-scale", type=float, default=0.12)
+    parser.add_argument("--safe-boundary-margin-norm", type=float, default=0.18)
+    parser.add_argument("--boundary-risk-penalty-scale", type=float, default=0.50)
 
     parser.add_argument("--start-randomization", choices=["fixed", "full_track", "curriculum"], default="curriculum")
     parser.add_argument("--start-s-m", type=float, default=0.0)
@@ -197,7 +201,11 @@ def raw_action_to_line_bias(raw_action: np.ndarray, obs: np.ndarray, args: argpa
     if not bool(args.use_racing_line) or raw_action.shape[-1] < 4:
         return np.zeros(raw_action.shape[0], dtype=np.float32)
     turn_gate = np.clip(np.abs(np.asarray(obs, dtype=np.float32)[:, 4]), 0.0, 1.0)
-    bias = float(args.max_line_bias_norm) * np.tanh(raw_action[:, 3]) * turn_gate
+    if bool(args.inside_line_only):
+        # Positive lateral error points to the inside of both oval turns.
+        bias = float(args.max_line_bias_norm) * (0.5 * (np.tanh(raw_action[:, 3]) + 1.0)) * turn_gate
+    else:
+        bias = float(args.max_line_bias_norm) * np.tanh(raw_action[:, 3]) * turn_gate
     return bias.astype(np.float32)
 
 
@@ -265,7 +273,7 @@ def apply_stability_envelope(
     command = np.asarray(command, dtype=np.float32).copy()
     turn_intensity = np.clip(np.abs(obs[:, 4]), 0.0, 1.0)
     heading_risk = np.minimum(np.abs(obs[:, 3]) / 1.0, 1.0)
-    lateral_risk = np.clip((np.abs(obs[:, 1]) - 0.35) / 0.65, 0.0, 1.0)
+    lateral_risk = np.zeros_like(heading_risk)
     edge_limit = max(float(args.edge_slowdown_margin_norm), 1e-6)
     edge_risk = np.clip((edge_limit - obs[:, 2]) / edge_limit, 0.0, 1.0)
     risk_scale = (
@@ -622,6 +630,13 @@ class JaxTrackBatchEnv:
         speed_fraction = np.clip(progress_speed / target_speed, 0.0, 1.0)
         slow_gap = np.clip((target_speed - progress_speed) / target_speed, 0.0, 2.0)
         backward_speed = np.clip(-progress_speed, 0.0, 2.0)
+        safe_boundary_margin = float(max(self.args.safe_boundary_margin_norm, 1e-6))
+        safe_margin_gate = np.clip((next_obs[:, 2] - safe_boundary_margin) / safe_boundary_margin, 0.0, 1.0)
+        inside_fraction = np.clip(next_obs[:, 1], 0.0, float(self.args.max_line_bias_norm)) / max(
+            float(self.args.max_line_bias_norm),
+            1e-6,
+        )
+        boundary_risk = np.clip((safe_boundary_margin - next_obs[:, 2]) / safe_boundary_margin, 0.0, 1.0)
         new_cum_progress = self.cum_progress + np.clip(delta_s, -0.20, 0.20)
         fallen = np.asarray(self.state.done, dtype=bool) | (qpos[:, 2] < 0.23)
         boundary = margin_m < 0.0
@@ -637,9 +652,11 @@ class JaxTrackBatchEnv:
             0.0,
             float(speed_cfg["max_vx"]),
         )
+        reward += float(self.args.inside_line_reward_scale) * turn_intensity * inside_fraction * safe_margin_gate
         reward -= float(self.args.slow_penalty_scale) * slow_gap
         reward -= float(self.args.backward_penalty_scale) * backward_speed
         reward += 0.02 * np.clip(next_obs[:, 2], 0.0, 1.0)
+        reward -= float(self.args.boundary_risk_penalty_scale) * np.square(boundary_risk)
         reward -= float(self.args.line_lateral_weight) * np.square(line_error_m)
         reward -= float(self.args.center_lateral_weight) * np.square(lateral_m)
         reward -= float(self.args.line_bias_penalty) * np.square(line_bias_norm)
@@ -757,11 +774,13 @@ def export_numpy_planner(
         "turn_speed_penalty": float(args.turn_speed_penalty),
         "min_speed_cap_scale": float(args.min_speed_cap_scale),
         "use_racing_line": bool(args.use_racing_line),
+        "inside_line_only": bool(args.inside_line_only),
         "max_line_bias_norm": float(args.max_line_bias_norm),
         "line_vy_gain": float(args.line_vy_gain),
         "line_yaw_gain": float(args.line_yaw_gain),
         "max_line_vy": float(args.max_line_vy),
         "max_line_yaw": float(args.max_line_yaw),
+        "safe_boundary_margin_norm": float(args.safe_boundary_margin_norm),
         "track_length_m": TRACK_LENGTH_M,
         "turn_radius_m": TURN_RADIUS_M,
         "half_width_m": HALF_WIDTH_M,

@@ -182,15 +182,16 @@ reward =
 - `rollout_steps = 512`
 - `total_updates = 200`
 - `max_episode_seconds = 240`
-- `start_max_vx = 1.25`
-- `max_vx = 2.50`
-- `start_target_straight_speed = 1.10`
-- `target_straight_speed = 2.50`
-- `start_target_curve_speed = 0.70`
-- `target_curve_speed = 2.20`
+- `start_max_vx = 1.50`
+- `max_vx = 3.50`
+- `start_target_straight_speed = 1.30`
+- `target_straight_speed = 3.20`
+- `start_target_curve_speed = 1.00`
+- `target_curve_speed = 2.80`
 - `speed_curriculum_updates = 80`
 - `use_racing_line = true`
-- `max_line_bias_norm = 0.50`
+- `inside_line_only = true`
+- `max_line_bias_norm = 0.75`
 - `gamma = 0.995`
 - `gae_lambda = 0.95`
 - `clip_eps = 0.20`
@@ -198,7 +199,7 @@ reward =
 - `minibatch_size = 1024`
 - actor/critic MLP：2 层 hidden，每层 64，Tanh。
 
-高层任务的有效 horizon 很长。助教演示一圈约 2 分 46 秒，即 166 秒；因此训练 episode 上限必须高于这个时间。`rollout_steps` 不需要一次覆盖完整一圈，因为并行环境会跨 PPO update 延续状态，但 `max_episode_seconds` 如果低于一圈时间，策略永远看不到真正的 full-lap terminal/bonus。当前推荐用 240 秒 episode 上限，并用 180 秒或 300 秒评估视频检查完整跑圈。速度目标采用课程学习：先从约 1.1m/s 起步，80 个 update 内平滑提升到直道 2.5m/s、弯道 2.2m/s，然后保留后续 update 做高速微调。高速实验默认启用 racing-line latent action：actor 内部多输出一维弯道横向 bias，部署时仍只返回 `[vx, vy, yaw_rate]`。
+高层任务的有效 horizon 很长。助教演示一圈约 2 分 46 秒，即 166 秒；因此训练 episode 上限必须高于这个时间。`rollout_steps` 不需要一次覆盖完整一圈，因为并行环境会跨 PPO update 延续状态，但 `max_episode_seconds` 如果低于一圈时间，策略永远看不到真正的 full-lap terminal/bonus。当前推荐用 240 秒 episode 上限，并用 180 秒或 300 秒评估视频检查完整跑圈。速度目标采用课程学习：先从约 1.3m/s 起步，80 个 update 内平滑提升到直道 3.2m/s、弯道 2.8m/s，命令上限为 3.5m/s，然后保留后续 update 做高速微调。高速实验默认启用 inside racing-line latent action：actor 内部多输出一维弯道内线横向 bias，部署时仍只返回 `[vx, vy, yaw_rate]`。弯道内只要还在安全边界内，不再因为偏离中心线而限速或惩罚；真正的惩罚来自接近边界、出界、摔倒和没有贴近 learned line。
 
 ## 可行性分析
 
@@ -332,15 +333,20 @@ _CHECKPOINT_METADATA
   --num-envs 64 \
   --rollout-steps 512 \
   --max-episode-seconds 240 \
-  --start-max-vx 1.25 \
-  --max-vx 2.50 \
-  --start-target-straight-speed 1.10 \
-  --target-straight-speed 2.50 \
-  --start-target-curve-speed 0.70 \
-  --target-curve-speed 2.20 \
+  --start-max-vx 1.50 \
+  --max-vx 3.50 \
+  --start-target-straight-speed 1.30 \
+  --target-straight-speed 3.20 \
+  --start-target-curve-speed 1.00 \
+  --target-curve-speed 2.80 \
   --speed-curriculum-updates 80 \
   --use-racing-line \
-  --max-line-bias-norm 0.50 \
+  --inside-line-only \
+  --max-line-bias-norm 0.75 \
+  --center-lateral-weight 0.0 \
+  --lateral-speed-penalty 0.0 \
+  --turn-speed-penalty 0.0 \
+  --min-speed-cap-scale 0.60 \
   --ppo-epochs 4 \
   --minibatch-size 1024 \
   --start-randomization curriculum \
